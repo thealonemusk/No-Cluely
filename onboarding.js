@@ -382,30 +382,30 @@
     whisperInitialized = true;
     const hints = {
       win32: {
-        title: "We'll create a project-local venv and install openai-whisper",
+        title: "We'll create a project-local venv and install faster-whisper",
         steps: [
           'Python 3.10+ must be on PATH (download from python.org if missing).',
           'A new <code>.venv-whisper\\</code> folder will be created in the app directory.',
-          'Whisper will be installed into that venv (pip download, no admin rights needed).',
-          'First transcription downloads the <code>small</code> model (~461 MB).',
+          'faster-whisper will be installed into that venv (pip download, no admin rights needed).',
+          'First transcription downloads the <code>small</code> model (~250 MB).',
         ],
       },
       darwin: {
-        title: "We'll create a project-local venv and install openai-whisper",
+        title: "We'll create a project-local venv and install faster-whisper",
         steps: [
           'Uses your existing Python 3 (install via Homebrew if missing).',
           'A new <code>.venv-whisper/</code> folder is created in the app data directory.',
-          'Whisper installs into that venv — no <code>sudo</code> required.',
-          'First transcription downloads the <code>small</code> model (~461 MB).',
+          'faster-whisper installs into that venv — no <code>sudo</code> required.',
+          'First transcription downloads the <code>small</code> model (~250 MB).',
         ],
       },
       other: {
-        title: "We'll create a project-local venv and install openai-whisper",
+        title: "We'll create a project-local venv and install faster-whisper",
         steps: [
           'Uses your system Python 3 (needs <code>python3-venv</code> on Debian/Ubuntu).',
           'A new <code>.venv-whisper/</code> folder is created in the app data directory.',
-          'Whisper installs into that venv — avoids the externally-managed-environment error.',
-          'First transcription downloads the <code>small</code> model (~461 MB).',
+          'faster-whisper installs into that venv — avoids the externally-managed-environment error.',
+          'First transcription downloads the <code>small</code> model (~250 MB).',
         ],
       },
     };

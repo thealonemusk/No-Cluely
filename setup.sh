@@ -31,7 +31,7 @@ Usage: ./setup.sh [options]
 This script will:
 1. Create .env from env.example when needed
 2. Install Node dependencies
-3. Optionally set up local Whisper in ${WHISPER_VENV_DIR}
+3. Optionally set up local faster-whisper in ${WHISPER_VENV_DIR}
 4. Optionally install system audio dependencies
 5. Optionally build the app
 6. Optionally run OpenCluely
@@ -93,12 +93,12 @@ detect_os() {
     windows)
       PYTHON_BIN="python"
       WHISPER_PIP_PATH="${WHISPER_VENV_DIR}/Scripts/pip.exe"
-      WHISPER_COMMAND_PATH="${WHISPER_VENV_DIR}/Scripts/whisper.exe"
+      WHISPER_COMMAND_PATH="${WHISPER_VENV_DIR}/Scripts/python.exe"
       ;;
     *)
       PYTHON_BIN="python3"
       WHISPER_PIP_PATH="${WHISPER_VENV_DIR}/bin/pip"
-      WHISPER_COMMAND_PATH="${WHISPER_VENV_DIR}/bin/whisper"
+      WHISPER_COMMAND_PATH="${WHISPER_VENV_DIR}/bin/python"
       ;;
   esac
 }
@@ -235,44 +235,30 @@ setup_whisper_env() {
     "$PYTHON_BIN" -m venv "$WHISPER_VENV_DIR"
   fi
 
-  echo "Installing local Whisper into $WHISPER_VENV_DIR"
+  echo "Installing faster-whisper into $WHISPER_VENV_DIR"
   "$WHISPER_PIP_PATH" install --upgrade pip || true
-  "$WHISPER_PIP_PATH" install openai-whisper || {
-    echo "WARNING: pip install openai-whisper failed. Whisper may be unavailable."
-    echo "Common causes: insufficient disk space (needs ~3-5 GB), missing Python headers, or network issues."
+  "$WHISPER_PIP_PATH" install faster-whisper || {
+    echo "WARNING: pip install faster-whisper failed. Speech may be unavailable."
+    echo "Common causes: insufficient disk space, missing Python headers, or network issues."
   }
 
   mkdir -p "$WHISPER_MODEL_DIR"
 
-  # Verify the Whisper CLI actually exists before claiming it's configured
   local whisper_found=0
-  if [[ -f "$WHISPER_COMMAND_PATH" ]]; then
-    echo "Whisper CLI found at: $WHISPER_COMMAND_PATH"
+  if [[ -f "$WHISPER_COMMAND_PATH" ]] && "$WHISPER_COMMAND_PATH" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('faster_whisper') else 1)"; then
+    echo "faster-whisper found via: $WHISPER_COMMAND_PATH"
     whisper_found=1
   else
-    # Fallback: try python -m whisper inside the venv
-    local venv_python
-    if [[ "$OS_NAME" == "windows" ]]; then
-      venv_python="${WHISPER_VENV_DIR}/Scripts/python.exe"
-    else
-      venv_python="${WHISPER_VENV_DIR}/bin/python"
-    fi
-    if [[ -f "$venv_python" ]] && "$venv_python" -m whisper --help >/dev/null 2>&1; then
-      echo "Whisper CLI not found as standalone script, but 'python -m whisper' works."
-      echo "Adjusting WHISPER_COMMAND to use venv Python module."
-      WHISPER_COMMAND_PATH="$venv_python"
-      whisper_found=1
-    else
-      echo "WARNING: Whisper CLI not found at $WHISPER_COMMAND_PATH"
-      echo "Speech recognition will be unavailable until Whisper is properly installed."
-      echo "You can skip this with: ./setup.sh --skip-whisper"
-    fi
+    echo "WARNING: faster-whisper is not importable from $WHISPER_COMMAND_PATH"
+    echo "Speech recognition will be unavailable until faster-whisper is properly installed."
+    echo "You can skip this with: ./setup.sh --skip-whisper"
   fi
 
   upsert_env "SPEECH_PROVIDER" "whisper"
   upsert_env "AZURE_SPEECH_KEY" ""
   upsert_env "AZURE_SPEECH_REGION" ""
   upsert_env "WHISPER_COMMAND" "${WHISPER_COMMAND_PATH}"
+  upsert_env "WHISPER_PYTHON" "${WHISPER_COMMAND_PATH}"
   upsert_env "WHISPER_MODEL_DIR" "${WHISPER_MODEL_DIR}"
   upsert_env "WHISPER_MODEL" "${WHISPER_MODEL}"
   upsert_env "WHISPER_LANGUAGE" "${WHISPER_LANGUAGE}"
@@ -282,7 +268,7 @@ setup_whisper_env() {
     echo "Running Whisper smoke test"
     npm run test-speech
   else
-    echo "Skipping Whisper smoke test (CLI not found)"
+    echo "Skipping Whisper smoke test (faster-whisper not found)"
   fi
 }
 

@@ -2,7 +2,7 @@
  * Whisper detection and install helpers.
  *
  * Used by the onboarding wizard to:
- *   - Probe whether the Whisper CLI is on PATH (or in a project-local venv)
+ *   - Probe whether faster-whisper is importable (project-local venv or PATH)
  *   - Run a real install into a project-local venv (no sudo, no PEP 668)
  *   - Stream live progress so the wizard can paint install output
  *
@@ -21,7 +21,7 @@ const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const PROBE_TIMEOUT_MS = 30000; // first `import whisper` (torch) is slow on a cold cache
+const PROBE_TIMEOUT_MS = 30000;
 const INSTALL_TIMEOUT_MS = 300000; // pip downloads can be slow on cold cache
 
 /**
@@ -155,8 +155,8 @@ class WhisperInstaller {
 
   /**
    * Inside the venv:
-   *   - macOS/Linux: bin/whisper, bin/python, bin/pip
-   *   - Windows:     Scripts\whisper.exe, Scripts\python.exe, Scripts\pip.exe
+   *   - macOS/Linux: bin/python, bin/pip
+   *   - Windows:     Scripts\python.exe, Scripts\pip.exe
    */
   get venvPaths() {
     const bin = this.platform === 'win32' ? 'Scripts' : 'bin';
@@ -166,7 +166,6 @@ class WhisperInstaller {
       dir,
       python: path.join(dir, `python${ext}`),
       pip: path.join(dir, `pip${ext}`),
-      whisper: path.join(dir, `whisper${ext}`),
     };
   }
 
@@ -219,14 +218,14 @@ class WhisperInstaller {
   // ─────────────────────────────────────────────────────────────────
 
   /**
-   * Install whisper into a project-local venv. Works on every platform
+   * Install faster-whisper into a project-local venv. Works on every platform
    * without admin rights and without hitting PEP 668.
    *
    * Steps:
    *   1. Find Python on the system (py / python3 / python)
    *   2. Create .venv-whisper/ if missing
-   *   3. pip install openai-whisper into it (live progress)
-   *   4. Verify the resulting whisper CLI works
+   *   3. pip install faster-whisper into it (live progress)
+   *   4. Verify `import faster_whisper` works
    *
    * @param {object} options
    * @param {(line: string) => void} [options.onProgress] Live output
@@ -248,9 +247,9 @@ class WhisperInstaller {
     }
     log(`✓ Found Python: ${python}`);
 
-    // openai-whisper requires Python 3.9+ (3.10+ recommended for best
-    // performance). Catch version mismatch BEFORE attempting pip
-    // install — the pip error is cryptic and confusing.
+    // faster-whisper requires Python 3.9+ (3.10+ recommended). Catch
+    // version mismatch BEFORE attempting pip install — the pip error
+    // is cryptic and confusing.
     const version = await this._getPythonVersion(python);
     if (!version) {
       log('! Could not determine Python version');
@@ -258,7 +257,7 @@ class WhisperInstaller {
     }
     log(`→ Python version: ${version}`);
     if (!this._isPythonVersionOk(version)) {
-      const msg = `Python ${version} is too old. openai-whisper requires Python 3.9 or newer. Please upgrade Python and retry.`;
+      const msg = `Python ${version} is too old. faster-whisper requires Python 3.9 or newer. Please upgrade Python and retry.`;
       log(`! ${msg}`);
       return { ok: false, command: null, message: msg, logs: msg };
     }
@@ -308,8 +307,8 @@ class WhisperInstaller {
     }
 
     // Step 3: pip install into the venv
-    log(`→ Installing openai-whisper into venv (this can take a few minutes)…`);
-    const pipResult = await this.runExec(vp.python, ['-m', 'pip', 'install', '--upgrade', 'openai-whisper'], {
+    log(`→ Installing faster-whisper into venv (this can take a few minutes)…`);
+    const pipResult = await this.runExec(vp.python, ['-m', 'pip', 'install', '--upgrade', 'faster-whisper'], {
       timeout: INSTALL_TIMEOUT_MS,
       onProgress: log,
     });
@@ -318,47 +317,36 @@ class WhisperInstaller {
       log(`! ${msg}`);
       return { ok: false, command: null, message: msg, logs: pipResult.stdout + '\n' + pipResult.stderr };
     }
-    log('✓ openai-whisper installed');
+    log('✓ faster-whisper installed');
 
-    // Step 4: verify the resulting CLI
-    log(`→ Verifying whisper CLI at ${vp.whisper}…`);
-    if (!fs.existsSync(vp.whisper)) {
-      const msg = `Install reported success but ${vp.whisper} was not created. Check your pip output above.`;
-      log(`! ${msg}`);
-      return { ok: false, command: null, message: msg, logs: msg };
-    }
-
-    const verify = await this._probe([vp.whisper]);
+    log(`→ Verifying faster-whisper import via ${vp.python}…`);
+    const verify = await this._probe([vp.python]);
     if (!verify.ok) {
-      const msg = `whisper binary exists but doesn't respond to --help. It may be corrupted.`;
+      const msg = `faster-whisper installed but import failed. Check your pip output above.`;
       log(`! ${msg}`);
       return { ok: false, command: null, message: msg, logs: msg };
     }
 
-    // Check for ffmpeg — whisper needs it for any non-WAV audio.
-    // We log a warning but don't fail; user can install it later.
+    // Check for ffmpeg — only needed for non-WAV audio. We always pass WAV.
     const ffmpeg = await this._probeFfmpeg();
     if (ffmpeg.found) {
       log(`✓ ffmpeg detected (${ffmpeg.path})`);
     } else {
       const ffmpegMsg = this.platform === 'win32'
-        ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio to Whisper). Install later with `winget install ffmpeg` only if you need other formats.'
+        ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `winget install ffmpeg` only if you need other formats.'
         : this.platform === 'darwin'
-          ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio to Whisper). Install later with `brew install ffmpeg` only if you need other formats.'
-          : 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio to Whisper). Install later with `sudo apt install ffmpeg` only if you need other formats.';
+          ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `brew install ffmpeg` only if you need other formats.'
+          : 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `sudo apt install ffmpeg` only if you need other formats.';
       log(`! ${ffmpegMsg}`);
     }
 
-    // Quote the python path if it contains spaces (common on Windows
-    // user profiles like "C:\Users\CANDAN SINGH\...").
     const pythonPath = vp.python.includes(' ') ? `"${vp.python}"` : vp.python;
-    const commandStr = `${pythonPath} -m whisper`;
-    log(`✓ Whisper CLI ready: ${commandStr} (v${verify.version || '?'})`);
+    log(`✓ faster-whisper ready: ${pythonPath} (v${verify.version || '?'})`);
 
     return {
       ok: true,
-      command: commandStr,
-      message: `Installed Whisper v${verify.version || '?'} into ${this.venvPath}`,
+      command: pythonPath,
+      message: `Installed faster-whisper v${verify.version || '?'} into ${this.venvPath}`,
       logs: pipResult.stdout,
       ffmpegDetected: ffmpeg.found,
     };
@@ -394,8 +382,8 @@ class WhisperInstaller {
           steps: [
             'Python 3.10+ must be on PATH (download from python.org if missing).',
             "We'll create <code>.venv-whisper\\</code> in the app directory — no admin needed.",
-            'openai-whisper installs into the venv via pip (live progress shown below).',
-            'First transcription downloads the <code>small</code> model (~461 MB).',
+            'faster-whisper installs into the venv via pip (live progress shown below).',
+            'First transcription downloads the <code>small</code> model (~250 MB).',
           ],
         };
       case 'darwin':
@@ -404,8 +392,8 @@ class WhisperInstaller {
           steps: [
             'Uses your existing Python 3 (install via Homebrew if missing).',
             "We'll create <code>.venv-whisper/</code> in the app directory.",
-            'openai-whisper installs into the venv — no <code>sudo</code> required.',
-            'First transcription downloads the <code>small</code> model (~461 MB).',
+            'faster-whisper installs into the venv — no <code>sudo</code> required.',
+            'First transcription downloads the <code>small</code> model (~250 MB).',
           ],
         };
       default:
@@ -415,7 +403,7 @@ class WhisperInstaller {
             'Uses your system Python 3.',
             "We'll create <code>.venv-whisper/</code> in the app directory.",
             'This avoids the "externally-managed-environment" pip error on Ubuntu 23.04+, Debian 12+, Fedora 38+.',
-            'First transcription downloads the <code>small</code> model (~461 MB).',
+            'First transcription downloads the <code>small</code> model (~250 MB).',
           ],
         };
     }
@@ -431,34 +419,20 @@ class WhisperInstaller {
    */
   _candidateCommands() {
     const vp = this.venvPaths;
+    const bin = this.platform === 'win32' ? 'Scripts' : 'bin';
+    const ext = this.platform === 'win32' ? '.exe' : '';
+    const cwdPython = path.join(this.cwd, '.venv-whisper', bin, `python${ext}`);
     const out = [
-      // Project-local venv — the canonical location we install into.
-      [vp.whisper],
-      [vp.python, '-m', 'whisper'],
+      [vp.python],
+      [cwdPython],
     ];
 
     if (this.platform === 'win32') {
-      out.push(
-        ['whisper'],
-        ['whisper.exe'],
-        // System Python via the launcher `py` (canonical Windows invocation)
-        ['py', '-m', 'whisper'],
-        ['python', '-m', 'whisper'],
-      );
+      out.push(['py'], ['python']);
     } else if (this.platform === 'darwin') {
-      out.push(
-        ['/opt/homebrew/bin/whisper'],
-        ['/usr/local/bin/whisper'],
-        ['whisper'],
-        ['python3', '-m', 'whisper'],
-      );
+      out.push(['/opt/homebrew/bin/python3'], ['/usr/local/bin/python3'], ['python3']);
     } else {
-      out.push(
-        ['whisper'],
-        ['/usr/local/bin/whisper'],
-        ['/usr/bin/whisper'],
-        ['python3', '-m', 'whisper'],
-      );
+      out.push(['python3'], ['/usr/local/bin/python3'], ['/usr/bin/python3']);
     }
     return out;
   }
@@ -477,17 +451,38 @@ class WhisperInstaller {
   }
 
   async _probe(candidate) {
-    const cmd = candidate[0];
-    const args = [...candidate.slice(1), '--help'];
-    const r = await this.runExec(cmd, args);
+    const python = this._pythonFromCandidate(candidate);
+    if (!python) return { ok: false };
+
+    const r = await this.runExec(python, [
+      '-c',
+      'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec("faster_whisper") else 1)',
+    ]);
     if (!r.ok) return { ok: false };
-    const version = this._extractVersion(r.stdout + r.stderr);
-    return { ok: true, version };
+
+    const ver = await this.runExec(python, [
+      '-c',
+      'import faster_whisper; print(getattr(faster_whisper, "__version__", ""))',
+    ], { timeout: 15000 });
+    return { ok: true, version: (ver.stdout || '').trim() || null };
   }
 
-  _extractVersion(text) {
-    const m = text && text.match(/whisper\s+v?(\d+\.\d+\.\d+)/i);
-    return m ? m[1] : null;
+  _pythonFromCandidate(candidate) {
+    if (!candidate || !candidate.length) return null;
+    const cmd = candidate[0];
+    const moduleIndex = candidate.indexOf('-m');
+    if (moduleIndex > 0) return cmd;
+
+    const base = path.basename(cmd).toLowerCase();
+    if (/^python(\d+(\.\d+)?)?(\.exe)?$/.test(base) || /^py(\.exe)?$/.test(base)) {
+      return cmd;
+    }
+
+    const sibling = path.join(
+      path.dirname(cmd),
+      this.platform === 'win32' ? 'python.exe' : 'python'
+    );
+    return fs.existsSync(sibling) ? sibling : null;
   }
 
   /**
@@ -540,8 +535,7 @@ class WhisperInstaller {
   }
 
   /**
-   * openai-whisper requires Python 3.9+. We warn below 3.10 and refuse
-   * below 3.9. Returns false if the version is too old.
+   * faster-whisper requires Python 3.9+. We refuse below 3.9.
    */
   _isPythonVersionOk(version) {
     const m = (version || '').match(/^(\d+)\.(\d+)/);
@@ -564,7 +558,7 @@ class WhisperInstaller {
     if (!pythonCmd) {
       const detectResult = await this.detect();
       if (!detectResult.found) {
-        return { ok: false, message: 'Whisper CLI not found. Install Whisper first.' };
+        return { ok: false, message: 'faster-whisper not found. Install it first.' };
       }
       pythonCmd = this._pythonFromCommand(detectResult.command);
     }
@@ -574,7 +568,7 @@ class WhisperInstaller {
     log(`→ Downloading ${modelName} weights to ${downloadRoot} (this may take a minute)…`);
     const loadResult = await this.runExec(pythonCmd, [
       '-c',
-      `import whisper; whisper.load_model(${JSON.stringify(modelName)}, download_root=${JSON.stringify(downloadRoot)}); print('model_loaded')`
+      `from faster_whisper import WhisperModel; WhisperModel(${JSON.stringify(modelName)}, device="cpu", compute_type="int8", download_root=${JSON.stringify(downloadRoot)}); print('model_loaded')`
     ], {
       timeout: 600000,
       onProgress: log,
@@ -584,9 +578,8 @@ class WhisperInstaller {
       return { ok: false, message: loadResult.stderr || loadResult.error };
     }
 
-    const modelPath = this._getModelPath(modelName);
-    log(`✓ Model ${modelName} ready at ${modelPath}`);
-    return { ok: true, message: `Model ${modelName} downloaded successfully`, path: modelPath };
+    log(`✓ Model ${modelName} ready in ${downloadRoot}`);
+    return { ok: true, message: `Model ${modelName} downloaded successfully`, path: downloadRoot };
   }
 
   _resolveWhisperPython() {
@@ -606,18 +599,15 @@ class WhisperInstaller {
     if (!tokens.length) return this.platform === 'win32' ? 'python' : 'python3';
 
     if (tokens.indexOf('-m') > 0) return tokens[0];
+    const base = path.basename(tokens[0]).toLowerCase();
+    if (/^python(\d+(\.\d+)?)?(\.exe)?$/.test(base) || /^py(\.exe)?$/.test(base)) {
+      return tokens[0];
+    }
 
     const binDir = path.dirname(tokens[0]);
     const sibling = path.join(binDir, this.platform === 'win32' ? 'python.exe' : 'python');
     if (fs.existsSync(sibling)) return sibling;
     return this.platform === 'win32' ? 'python' : 'python3';
-  }
-
-  /**
-   * Get the expected model cache path inside our unified model dir.
-   */
-  _getModelPath(modelName) {
-    return path.join(this.modelDir, `${modelName}.pt`);
   }
 }
 

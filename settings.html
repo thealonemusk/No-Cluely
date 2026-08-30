@@ -355,7 +355,7 @@
                     <div class="settings-item">
                         <div>
                             <div class="settings-item-label">Speech Provider</div>
-                            <div class="settings-item-description">Choose Azure Speech or a local OpenAI Whisper CLI</div>
+                            <div class="settings-item-description">Choose Azure Speech or local faster-whisper</div>
                         </div>
                         <select class="input-field" id="speechProvider">
                             <option value="azure">Azure Speech</option>
@@ -386,16 +386,16 @@
                         <div class="settings-item">
                             <div class="settings-stack">
                                 <div>
-                                    <div class="settings-item-label">Whisper Command</div>
-                                    <div class="settings-item-description">CLI command for local Whisper, such as <code>whisper</code> or <code>python3 -m whisper</code></div>
+                                    <div class="settings-item-label">Whisper Python</div>
+                                    <div class="settings-item-description">Python that has faster-whisper installed. Onboarding sets this to the project venv automatically.</div>
                                 </div>
-                                <input type="text" class="input-field" id="whisperCommand" placeholder="whisper" style="max-width: 100%;">
+                                <input type="text" class="input-field" id="whisperCommand" placeholder=".venv-whisper/Scripts/python.exe" style="max-width: 100%;">
                             </div>
                         </div>
                         <div class="settings-item">
                             <div>
                                 <div class="settings-item-label">Whisper Model</div>
-                                <div class="settings-item-description">Local model name used by the Whisper CLI</div>
+                                <div class="settings-item-description">Local model name used by faster-whisper (tiny, base, small, medium, large-v3)</div>
                             </div>
                             <input type="text" class="input-field" id="whisperModel" placeholder="small">
                         </div>

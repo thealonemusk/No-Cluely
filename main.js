@@ -37,7 +37,7 @@ require("dotenv").config({ path: ENV_PATH });
 // backslashes are kept verbatim (doubling them corrupts Windows paths on the
 // next load). Values containing whitespace, a double-quote, or a leading '#'
 // are wrapped in single quotes so dotenv parses them as one token — essential
-// for Whisper commands like:  "C:\Users\Jane Doe\...\python.exe" -m whisper
+// for Whisper commands like:  C:\Users\Jane Doe\...\python.exe
 function formatEnvValue(raw) {
   const v = String(raw).replace(/[\r\n]+/g, " ").trim();
   if (!/[\s"#]/.test(v)) return v;

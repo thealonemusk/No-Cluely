@@ -5,15 +5,18 @@ import sys
 import traceback
 import wave
 
+import ctranslate2
 import numpy as np
-import torch
-import whisper
+from faster_whisper import WhisperModel
 
+
+SAMPLE_RATE = 16000
 
 model = None
 model_name = None
 model_dir = None
 model_device = None
+model_compute_type = None
 
 
 def send(payload):
@@ -21,47 +24,80 @@ def send(payload):
     sys.stdout.flush()
 
 
+def cuda_available():
+    try:
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def gpu_name():
+    if not cuda_available():
+        return None
+    try:
+        return ctranslate2.get_cuda_device_name(0)
+    except Exception:
+        return 'cuda'
+
+
+def resolve_device(requested):
+    requested = (requested or 'auto').lower()
+    if requested == 'auto':
+        return 'cuda' if cuda_available() else 'cpu'
+    if requested == 'cuda' and not cuda_available():
+        raise RuntimeError(
+            'CUDA was requested but CTranslate2 has no CUDA device'
+        )
+    return requested
+
+
+def resolve_compute_type(device, requested):
+    requested = (requested or 'auto').lower()
+    if requested and requested != 'auto':
+        return requested
+    return 'float16' if device == 'cuda' else 'int8'
+
+
 def unload_model():
-    global model, model_name, model_dir, model_device
+    global model, model_name, model_dir, model_device, model_compute_type
     model = None
     model_name = None
     model_dir = None
     model_device = None
+    model_compute_type = None
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 
 def ensure_model(request):
-    global model, model_name, model_dir, model_device
+    global model, model_name, model_dir, model_device, model_compute_type
     requested_name = request.get('model') or 'small'
     requested_dir = request.get('model_dir') or None
-    requested_device = request.get('device') or 'auto'
-    if requested_device == 'auto':
-        requested_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    if requested_device == 'cuda' and not torch.cuda.is_available():
-        raise RuntimeError(
-            'CUDA was requested but this Python environment has no CUDA-enabled PyTorch build'
-        )
+    requested_device = resolve_device(request.get('device') or 'auto')
+    requested_compute = resolve_compute_type(
+        requested_device, request.get('compute_type') or 'auto'
+    )
 
     if (
         model is None
         or model_name != requested_name
         or model_dir != requested_dir
         or model_device != requested_device
+        or model_compute_type != requested_compute
     ):
         unload_model()
-        model = whisper.load_model(
-            requested_name,
-            device=requested_device,
-            download_root=requested_dir,
-        )
+        kwargs = {
+            'device': requested_device,
+            'compute_type': requested_compute,
+        }
+        if requested_dir:
+            kwargs['download_root'] = requested_dir
+        model = WhisperModel(requested_name, **kwargs)
         model_name = requested_name
         model_dir = requested_dir
         model_device = requested_device
+        model_compute_type = requested_compute
 
-    return model, requested_device
+    return model, requested_device, requested_compute
 
 
 def load_audio_input(audio_path):
@@ -84,51 +120,51 @@ def load_audio_input(audio_path):
             samples = samples.reshape(-1, channels).mean(axis=1)
         samples /= 32768.0
 
-        if sample_rate != whisper.audio.SAMPLE_RATE and samples.size:
-            output_size = max(1, round(samples.size * whisper.audio.SAMPLE_RATE / sample_rate))
+        if sample_rate != SAMPLE_RATE and samples.size:
+            output_size = max(1, round(samples.size * SAMPLE_RATE / sample_rate))
             source_positions = np.arange(samples.size, dtype=np.float64)
             target_positions = np.linspace(0, samples.size - 1, output_size)
             samples = np.interp(target_positions, source_positions, samples).astype(np.float32)
 
         return samples
     except (OSError, EOFError, wave.Error, ValueError):
-        # Non-PCM or malformed WAV files can still use Whisper's normal
-        # filename loader when ffmpeg is available on the host.
         return audio_path
 
 
 def transcribe(request):
-    loaded_model, device = ensure_model(request)
+    loaded_model, device, compute_type = ensure_model(request)
     language = request.get('language') or None
     if language in ('auto', 'detect'):
         language = None
 
-    result = loaded_model.transcribe(
+    segments, info = loaded_model.transcribe(
         load_audio_input(request['audio_path']),
         language=language,
         task='transcribe',
-        fp16=device == 'cuda',
-        verbose=None,
+        beam_size=5,
         temperature=0,
         condition_on_previous_text=False,
+        without_timestamps=True,
     )
+    text = ''.join(segment.text for segment in segments).strip()
     return {
-        'text': (result.get('text') or '').strip(),
-        'language': result.get('language'),
+        'text': text,
+        'language': getattr(info, 'language', None),
         'device': device,
+        'compute_type': compute_type,
         'model': model_name,
-        'cuda_available': torch.cuda.is_available(),
-        'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        'cuda_available': cuda_available(),
+        'gpu': gpu_name(),
     }
 
 
 send({
     'event': 'ready',
     'pid': os.getpid(),
-    'torch': torch.__version__,
-    'cuda_available': torch.cuda.is_available(),
-    'torch_cuda': torch.version.cuda,
-    'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    'engine': 'faster-whisper',
+    'ctranslate2': getattr(ctranslate2, '__version__', None),
+    'cuda_available': cuda_available(),
+    'gpu': gpu_name(),
 })
 
 for raw_line in sys.stdin:
@@ -145,15 +181,16 @@ for raw_line in sys.stdin:
         if action == 'transcribe':
             send({'id': request_id, 'ok': True, **transcribe(request)})
         elif action == 'warmup':
-            _, device = ensure_model(request)
+            _, device, compute_type = ensure_model(request)
             send({
                 'id': request_id,
                 'ok': True,
                 'warmed': True,
                 'device': device,
+                'compute_type': compute_type,
                 'model': model_name,
-                'cuda_available': torch.cuda.is_available(),
-                'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+                'cuda_available': cuda_available(),
+                'gpu': gpu_name(),
             })
         elif action == 'unload':
             unload_model()

@@ -132,7 +132,7 @@ Speech is optional. If no provider is configured, the microphone button hides it
 
 You can use local Whisper for offline transcription or Azure Speech for a cloud option.
 
-For local Whisper, `./setup.sh` handles the full setup. It creates `.venv-whisper`, installs `openai-whisper`, points `.env` at the virtual environment, creates `.whisper-models`, and runs a quick speech test. The app reads its own PCM WAV recordings directly; ffmpeg is only needed when transcribing other audio formats through the CLI fallback.
+For local Whisper, `./setup.sh` handles the full setup. It creates `.venv-whisper`, installs `faster-whisper`, points `.env` at the virtual environment, creates `.whisper-models`, and runs a quick speech test. The app reads its own PCM WAV recordings directly; ffmpeg is only needed for non-WAV audio.
 
 For Azure Speech, create a Speech resource in the [Azure Portal](https://portal.azure.com/), then add the key and region to `.env` with `SPEECH_PROVIDER=azure`.
 
@@ -199,7 +199,7 @@ OpenCluely is under active development. The core is stable and improvements ship
 - **Electron will not start or shows a blank window on Linux.** Try `npm run dev`, and make sure X11 or XWayland is available in headless setups.
 - **macOS screen capture does not work.** Grant Screen Recording permission under System Settings, Privacy and Security, then relaunch the app.
 - **Windows SmartScreen blocks the app.** Click More info, then Run anyway, or use `npm start` during development.
-- **Microphone or voice not working.** Voice is optional. For Azure, add valid keys to `.env`. For Whisper, install `openai-whisper`, `ffmpeg`, and `sox`, then set `SPEECH_PROVIDER=whisper`.
+- **Microphone or voice not working.** Voice is optional. For Azure, add valid keys to `.env`. For Whisper, install `faster-whisper` in the project venv, then set `SPEECH_PROVIDER=whisper`.
 
 </details>
 
@@ -226,7 +226,7 @@ Released under the MIT License. See [LICENSE](LICENSE) for details.
 ## Acknowledgments
 
 - Google Gemini for the AI reasoning
-- Azure Speech and OpenAI Whisper for optional voice input
+- Azure Speech and faster-whisper for optional voice input
 - Electron for the cross platform desktop runtime
 - [Vysper by varun-singhh](https://github.com/varun-singhh/Vysper) for UI and structure inspiration
 
