@@ -390,24 +390,23 @@ class ApplicationController {
 
   setupGlobalShortcuts() {
     const shortcuts = {
-      "CommandOrControl+Shift+S": () => this.triggerScreenshotOCR(),
-      "CommandOrControl+Shift+V": () => windowManager.toggleVisibility(),
-      "CommandOrControl+Shift+I": () => windowManager.toggleInteraction(),
-      "CommandOrControl+Shift+C": () => windowManager.switchToWindow("chat"),
-      "CommandOrControl+Shift+\\": () => this.clearSessionMemory(),
-      "CommandOrControl+,": () => windowManager.showSettings(),
+      "Control+Shift+S": () => this.triggerScreenshotOCR(),
+      "Control+Shift+V": () => windowManager.toggleVisibility(),
+      "Control+Shift+I": () => windowManager.toggleInteraction(),
+      "Control+Shift+C": () => windowManager.switchToWindow("chat"),
+      "Control+Shift+\\": () => this.clearSessionMemory(),
+      "Control+,": () => windowManager.showSettings(),
       "Alt+A": () => windowManager.toggleInteraction(),
       "Alt+R": () => this.toggleSpeechRecognition(),
-      "CommandOrControl+Shift+T": () => windowManager.forceAlwaysOnTopForAllWindows(),
-      "CommandOrControl+Shift+Alt+T": () => {
+      "Control+Shift+T": () => windowManager.forceAlwaysOnTopForAllWindows(),
+      "Control+Shift+Alt+T": () => {
         const results = windowManager.testAlwaysOnTopForAllWindows();
         logger.info('Always-on-top test triggered via shortcut', results);
       },
-      // Context-sensitive shortcuts based on interaction mode
-      "CommandOrControl+Up": () => this.handleUpArrow(),
-      "CommandOrControl+Down": () => this.handleDownArrow(),
-      "CommandOrControl+Left": () => this.handleLeftArrow(),
-      "CommandOrControl+Right": () => this.handleRightArrow(),
+      "Control+Up": () => this.handleUpArrow(),
+      "Control+Down": () => this.handleDownArrow(),
+      "Control+Left": () => this.handleLeftArrow(),
+      "Control+Right": () => this.handleRightArrow(),
     };
 
     Object.entries(shortcuts).forEach(([accelerator, handler]) => {

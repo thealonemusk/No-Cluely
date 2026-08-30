@@ -548,28 +548,23 @@ class MainWindowUI {
 
     setupKeyboardShortcuts() {
         document.addEventListener('keydown', (e) => {
-            if (e.metaKey && e.key === '\\') {
+            if (e.ctrlKey && e.key === '\\') {
                 this.isHidden = !this.isHidden;
                 if (this.isHidden) {
                     this.showHiddenIndicator();
                 }
             }
             
-            // Handle Cmd + Arrow keys based on interaction mode
-            if (e.metaKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            if (e.ctrlKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
                 e.preventDefault();
 
                 if (this.isInteractive) {
-                    // Interactive mode: Cmd + Up/Down for skill navigation
                     if (e.key === 'ArrowUp') {
-                        this.navigateSkill(-1); // Previous skill
+                        this.navigateSkill(-1);
                     } else if (e.key === 'ArrowDown') {
-                        this.navigateSkill(1); // Next skill
-                    } else {
+                        this.navigateSkill(1);
                     }
-                    // Left/Right arrows do nothing in interactive mode
                 } else {
-                    // Non-interactive mode: Cmd + Arrow keys for window movement
                     this.moveWindow(e.key);
                 }
             }
@@ -794,7 +789,7 @@ class MainWindowUI {
             skillSpan.textContent = skillName;
                         
             const tooltip = this.isInteractive ? 
-                `${skillName} - Use ⌘↑/↓ to navigate skills` : 
+                `${skillName} - Use Ctrl+↑/↓ to navigate skills` : 
                 `${skillName} - Enable interactive mode (Alt+A) to navigate`;
             this.skillIndicator.title = tooltip;
             
@@ -1115,8 +1110,7 @@ class MainWindowUI {
 
     setupSettingsShortcut() {
         document.addEventListener('keydown', (e) => {
-            // Cmd+, or Ctrl+, for settings
-            if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+            if (e.ctrlKey && e.key === ',') {
                 logger.debug('Settings keyboard shortcut pressed');
                 e.preventDefault();
                 this.openSettings();
