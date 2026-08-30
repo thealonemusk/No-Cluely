@@ -170,9 +170,12 @@ def transcribe(request):
         language=language,
         task='transcribe',
         beam_size=beam_size,
+        best_of=1,
+        patience=1.0,
         temperature=0,
         condition_on_previous_text=False,
         without_timestamps=True,
+        no_speech_threshold=0.6,
     )
     text = ''.join(segment.text for segment in segments).strip()
     return {

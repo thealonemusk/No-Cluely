@@ -269,15 +269,8 @@ class ChatWindowUI {
             // Hide listening animation first
             this.hideListeningAnimation();
             
-            // Show transcribed text with a slight delay for smooth transition
-            setTimeout(() => {
-                this.addMessage(text, 'transcription');
-                
-                // Show thinking indicator after transcription
-                setTimeout(() => {
-                    this.showThinkingIndicator();
-                }, 300);
-            }, 200);
+            this.addMessage(text, 'transcription');
+            this.showThinkingIndicator();
             
             logger.debug('Transcription received in chat', { textLength: text.length });
         } else {

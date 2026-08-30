@@ -38,7 +38,7 @@ class WindowManager {
     
     this.windowConfigs = {
       main: {
-        width: 520,
+        width: 720,
         height: 35,
         useContentSize: true,
         file: 'index.html',

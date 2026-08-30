@@ -244,7 +244,7 @@ class MainWindowUI {
             const commandTab = document.querySelector('.command-tab');
             if (commandTab && window.electronAPI && window.electronAPI.resizeWindow) {
                 const rect = commandTab.getBoundingClientRect();
-                const width = Math.ceil(rect.width);
+                const width = Math.ceil(Math.max(rect.width, commandTab.scrollWidth));
                 let height = Math.ceil(rect.height);
 
                 // If shortcuts popover is visible, extend height to fit it
@@ -367,7 +367,10 @@ class MainWindowUI {
                     const commandTab = document.querySelector('.command-tab');
                     if (commandTab && window.electronAPI && window.electronAPI.resizeWindow) {
                         const rect = commandTab.getBoundingClientRect();
-                        window.electronAPI.resizeWindow(Math.ceil(rect.width), Math.ceil(rect.height));
+                        window.electronAPI.resizeWindow(
+                            Math.ceil(Math.max(rect.width, commandTab.scrollWidth)),
+                            Math.ceil(rect.height)
+                        );
                     }
                 }, 50);
             });

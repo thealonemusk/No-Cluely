@@ -1013,15 +1013,8 @@
           // Hide listening animation first
           hideListeningAnimation();
 
-          // Show transcribed text with slight delay for smooth transition
-          setTimeout(() => {
-            addMessage(text.trim(), 'transcription');
-            
-            // Show thinking indicator after transcription
-            setTimeout(() => {
-              showThinkingIndicator();
-            }, 300);
-          }, 200);
+          addMessage(text.trim(), 'transcription');
+          showThinkingIndicator();
         } else {
           console.warn('Invalid or empty transcription text - ignoring:', text);
         }

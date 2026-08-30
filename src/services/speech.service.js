@@ -1301,7 +1301,7 @@ class SpeechService extends EventEmitter {
   }
 
   _getSilenceHangoverMs() {
-    return this._vadNumber('whisperSilenceHangoverMs', 'WHISPER_SILENCE_HANGOVER_MS', 'speech.whisper.silenceHangoverMs', 700, 200);
+    return this._vadNumber('whisperSilenceHangoverMs', 'WHISPER_SILENCE_HANGOVER_MS', 'speech.whisper.silenceHangoverMs', 320, 200);
   }
 
   _getMinUtteranceMs() {
@@ -1408,7 +1408,7 @@ class SpeechService extends EventEmitter {
   _configureWhisperWorker() {
     const pythonPath = this._getWhisperPythonPath();
     const scriptPath = this._getWhisperWorkerScriptPath();
-    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS || 60000));
+    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS || 180000));
     this.whisperWorker.configure({ pythonPath, scriptPath, idleUnloadMs });
 
     logger.info('Whisper worker configuration', {
