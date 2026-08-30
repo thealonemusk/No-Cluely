@@ -1,13 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 
+const AVAILABLE_SKILLS = ['dsa', 'lld', 'hld'];
+
 class PromptLoader {
   constructor() {
     this.prompts = new Map();
     this.promptsLoaded = false;
     this.skillPromptSent = new Set();
-    // Focus only on DSA
-    this.skillsRequiringProgrammingLanguage = ['dsa'];
+    this.availableSkills = AVAILABLE_SKILLS;
+    this.skillsRequiringProgrammingLanguage = ['dsa', 'lld'];
   }
 
   /**
@@ -28,7 +30,7 @@ class PromptLoader {
       for (const file of files) {
         if (file.endsWith('.md')) {
           const skillName = path.basename(file, '.md');
-          if (skillName !== 'dsa') continue; // only keep DSA
+          if (!AVAILABLE_SKILLS.includes(skillName)) continue;
           const filePath = path.join(promptsDir, file);
           const promptContent = fs.readFileSync(filePath, 'utf8');
           
@@ -97,6 +99,14 @@ STRICT REQUIREMENTS:
 - Provide: brief approach, then final ${languageTitle} implementation, followed by time/space complexity.
 - If the user's input is a problem statement (and does not include code), produce a complete, runnable ${languageTitle} solution without asking for clarification.
 - Avoid unnecessary verbosity; focus on correctness, clarity, and efficiency.`;
+        break;
+      case 'lld':
+        languageInjection = `\n\n## IMPLEMENTATION LANGUAGE: ${languageUpper}
+STRICT REQUIREMENTS:
+- Design and implement ONLY in ${languageTitle}.
+- All code blocks must use triple backticks with the exact language tag: \`\`\`${fenceTag}\`\`\`.
+- Provide class structure, public APIs, and a complete ${languageTitle} implementation of the key types.
+- Do not include other languages unless explicitly asked.`;
         break;
       default:
         languageInjection = `\n\n## PROGRAMMING LANGUAGE: ${languageUpper}\nAll code and examples must be in ${languageTitle}. Use code fences with tag: \`\`\`${fenceTag}\`\`\`.`;
@@ -317,47 +327,33 @@ STRICT REQUIREMENTS:
    * @returns {string} Normalized skill name
    */
   normalizeSkillName(skillName) {
-    if (!skillName) return 'general';
-    
-    // Convert to lowercase and handle common variations
+    if (!skillName) return 'dsa';
+
     const normalized = skillName.toLowerCase().trim();
-    
-    // Map common variations to standard names
     const skillMap = {
-      'dsa': 'dsa',
+      dsa: 'dsa',
       'data-structures': 'dsa',
-      'algorithms': 'dsa',
+      algorithms: 'dsa',
       'data-structures-algorithms': 'dsa',
-      'behavioral': 'behavioral',
-      'behavioral-interview': 'behavioral',
-      'behavior': 'behavioral',
-      'sales': 'sales',
-      'selling': 'sales',
-      'business-development': 'sales',
-      'presentation': 'presentation',
-      'presentations': 'presentation',
-      'public-speaking': 'presentation',
-      'data-science': 'data-science',
-      'datascience': 'data-science',
-      'machine-learning': 'data-science',
-      'ml': 'data-science',
-      'programming': 'programming',
-      'coding': 'programming',
-      'software-development': 'programming',
-      'development': 'programming',
-      'devops': 'devops',
-      'dev-ops': 'devops',
-      'infrastructure': 'devops',
-      'system-design': 'system-design',
-      'systems-design': 'system-design',
-      'architecture': 'system-design',
-      'distributed-systems': 'system-design',
-      'negotiation': 'negotiation',
-      'negotiating': 'negotiation',
-      'conflict-resolution': 'negotiation'
+      coding: 'dsa',
+      programming: 'dsa',
+      lld: 'lld',
+      'low-level-design': 'lld',
+      'low-level': 'lld',
+      'class-design': 'lld',
+      ood: 'lld',
+      oops: 'lld',
+      hld: 'hld',
+      'high-level-design': 'hld',
+      'high-level': 'hld',
+      'system-design': 'hld',
+      'systems-design': 'hld',
+      architecture: 'hld',
+      'distributed-systems': 'hld'
     };
 
-    return skillMap[normalized] || normalized;
+    const resolved = skillMap[normalized] || normalized;
+    return AVAILABLE_SKILLS.includes(resolved) ? resolved : 'dsa';
   }
 
   /**
@@ -368,7 +364,7 @@ STRICT REQUIREMENTS:
     if (!this.promptsLoaded) {
       this.loadPrompts();
     }
-    return ['dsa'];
+    return [...AVAILABLE_SKILLS];
   }
 
   /**
@@ -404,5 +400,6 @@ const promptLoader = new PromptLoader();
 
 module.exports = {
   PromptLoader,
-  promptLoader
+  promptLoader,
+  AVAILABLE_SKILLS
 };

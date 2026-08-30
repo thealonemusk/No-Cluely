@@ -6,27 +6,34 @@ const logger = {
     warn: (...args) => console.warn('[MainWindowUI WARN]', ...args)
 };
 
+const AVAILABLE_SKILLS = ['dsa', 'lld', 'hld'];
 const SKILL_DISPLAY_NAMES = {
     dsa: 'DSA',
-    behavioral: 'Behavioral',
-    sales: 'Sales',
-    presentation: 'Presentation',
-    'data-science': 'Data Science',
-    programming: 'Programming',
-    devops: 'DevOps',
-    'system-design': 'System Design',
-    negotiation: 'Negotiation'
+    lld: 'LLD',
+    hld: 'HLD'
 };
 
+function resolveSkill(skill) {
+    const key = String(skill || '').toLowerCase().trim();
+    if (key === 'lld' || key === 'ood' || key === 'low-level-design' || key === 'low-level') {
+        return 'lld';
+    }
+    if (key === 'hld' || key === 'system-design' || key === 'architecture' || key === 'high-level-design') {
+        return 'hld';
+    }
+    return 'dsa';
+}
+
 function getSkillDisplayName(skill) {
-    return SKILL_DISPLAY_NAMES[skill] || String(skill || '').toUpperCase();
+    const resolved = resolveSkill(skill);
+    return SKILL_DISPLAY_NAMES[resolved] || resolved.toUpperCase();
 }
 
 class MainWindowUI {
     constructor() {
         this.isInteractive = false;
         this.isHidden = false;
-        this.currentSkill = 'dsa'; // Default, will be updated from settings
+        this.currentSkill = 'dsa';
         this.statusDot = null;
         this.skillIndicator = null;
         this.micButton = null;
@@ -39,10 +46,7 @@ class MainWindowUI {
         this._scriptNode = null;
         this._captureInterval = null;
         
-        // Define available skills for navigation
-        this.availableSkills = [
-            'dsa'
-        ];
+        this.availableSkills = AVAILABLE_SKILLS;
         
         this.init();
     }
@@ -90,7 +94,7 @@ class MainWindowUI {
             if (window.electronAPI && window.electronAPI.getSettings) {
                 const settings = await window.electronAPI.getSettings();
                 if (settings && settings.activeSkill) {
-                    this.currentSkill = settings.activeSkill;
+                    this.currentSkill = resolveSkill(settings.activeSkill);
                     logger.debug('Loaded current skill from settings', {
                         component: 'MainWindowUI',
                         skill: this.currentSkill
@@ -304,17 +308,8 @@ class MainWindowUI {
             }
         });
 
-        // Skill indicator click handler toggles DSA skill
         this.skillIndicator.addEventListener('click', () => {
-            if (!this.isInteractive) return;
-            const newSkill = 'dsa';
-            if (window.electronAPI && window.electronAPI.updateActiveSkill) {
-                window.electronAPI.updateActiveSkill(newSkill).then(() => {
-                    this.handleSkillActivated(newSkill);
-                });
-            } else {
-                this.handleSkillActivated(newSkill);
-            }
+            this.navigateSkill(1);
         });
 
         // Check for required elements (settingsIndicator is optional)
@@ -612,7 +607,7 @@ class MainWindowUI {
 
     handleSkillChanged(data) {
         const oldSkill = this.currentSkill;
-        this.currentSkill = data.skill;
+        this.currentSkill = resolveSkill(data.skill);
         
         logger.info('Handling skill change', {
             component: 'MainWindowUI',
@@ -630,7 +625,7 @@ class MainWindowUI {
     }
 
     handleSkillActivated(skillName) {
-        this.currentSkill = skillName;
+        this.currentSkill = resolveSkill(skillName);
         this.updateSkillIndicator();
         
         logger.info('Skill activated', {
@@ -819,6 +814,7 @@ class MainWindowUI {
             return;
         }
         
+        this.currentSkill = resolveSkill(this.currentSkill);
         const currentIndex = this.availableSkills.indexOf(this.currentSkill);
         if (currentIndex === -1) {
             logger.error('Current skill not found in available skills array');

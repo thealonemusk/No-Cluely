@@ -47,7 +47,7 @@ a strict BYOK model so the user keeps control of their API key and their data.
 
 ## Use cases
 
-- Real-time AI assistance during coding interviews (DSA, system design, language-specific questions).
+- Real-time AI assistance during DSA, LLD, and HLD interview rounds.
 - Live technical Q&A during remote interviews on Zoom, Google Meet, Microsoft Teams, Discord, or OBS.
 - Private practice mode where the overlay floats above the editor and answers stream in word by word.
 - Learning a new programming language by asking Gemini from inside the overlay.

@@ -863,8 +863,8 @@ class ApplicationController {
     });
 
     ipcMain.handle("update-active-skill", (event, skill) => {
-      this.activeSkill = skill;
-      windowManager.broadcastToAllWindows("skill-changed", { skill });
+      this.activeSkill = promptLoader.normalizeSkillName(skill);
+      windowManager.broadcastToAllWindows("skill-changed", { skill: this.activeSkill });
       return { success: true };
     });
 
@@ -933,8 +933,8 @@ class ApplicationController {
 
     // Handle update skill
     ipcMain.on("update-skill", (event, skill) => {
-      this.activeSkill = skill;
-      windowManager.broadcastToAllWindows("skill-updated", { skill });
+      this.activeSkill = promptLoader.normalizeSkillName(skill);
+      windowManager.broadcastToAllWindows("skill-updated", { skill: this.activeSkill });
     });
 
     // Handle quit app (alternative method)
@@ -1038,6 +1038,7 @@ class ApplicationController {
 
   navigateSkill(direction) {
     const availableSkills = promptLoader.getAvailableSkills();
+    this.activeSkill = promptLoader.normalizeSkillName(this.activeSkill);
 
     const currentIndex = availableSkills.indexOf(this.activeSkill);
     if (currentIndex === -1) {
@@ -1544,9 +1545,9 @@ class ApplicationController {
         });
       }
       if (settings.activeSkill) {
-        this.activeSkill = settings.activeSkill;
+        this.activeSkill = promptLoader.normalizeSkillName(settings.activeSkill);
         windowManager.broadcastToAllWindows("skill-updated", {
-          skill: settings.activeSkill,
+          skill: this.activeSkill,
         });
       }
       if (settings.appIcon) {

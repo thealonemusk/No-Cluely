@@ -620,7 +620,14 @@ class LLMService {
 
   formatImageInstruction(activeSkill, programmingLanguage) {
     const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
-    return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen ${activeSkill.toUpperCase()} problem and give the best solution with explanation and final code.${langNote}`;
+    const skill = promptLoader.normalizeSkillName(activeSkill);
+    if (skill === 'hld') {
+      return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen high-level design problem and give requirements, architecture, APIs, data stores, bottlenecks, and trade-offs.${langNote}`;
+    }
+    if (skill === 'lld') {
+      return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen low-level design problem and give classes, APIs, and production-ready code.${langNote}`;
+    }
+    return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen DSA problem and give the best solution with explanation and final code.${langNote}`;
   }
 
   async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
@@ -1584,13 +1591,14 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     logger.info('Generating fallback response', { activeSkill });
 
     const fallbackResponses = {
-      'dsa': 'This appears to be a data structures and algorithms problem. Consider breaking it down into smaller components and identifying the appropriate algorithm or data structure to use.',
-      'system-design': 'For this system design question, consider scalability, reliability, and the trade-offs between different architectural approaches.',
-      'programming': 'This looks like a programming challenge. Focus on understanding the requirements, edge cases, and optimal time/space complexity.',
-      'default': 'I can help analyze this content. Please ensure your Gemini API key is properly configured for detailed analysis.'
+      dsa: 'This appears to be a data structures and algorithms problem. Consider breaking it down into smaller components and identifying the appropriate algorithm or data structure to use.',
+      lld: 'This looks like a low-level design question. Identify the core classes, public APIs, and how they collaborate, then implement the key types.',
+      hld: 'This looks like a high-level design question. Cover requirements, scale, core services, data stores, APIs, and the main trade-offs.',
+      default: 'I can help analyze this content. Please ensure your Gemini API key is properly configured for detailed analysis.'
     };
 
-    const response = fallbackResponses[activeSkill] || fallbackResponses.default;
+    const skill = promptLoader.normalizeSkillName(activeSkill);
+    const response = fallbackResponses[skill] || fallbackResponses.default;
     
     return {
       response,
@@ -1608,15 +1616,9 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
 
     // Simple heuristic to determine if message seems skill-related
     const skillKeywords = {
-      'dsa': ['algorithm', 'data structure', 'array', 'tree', 'graph', 'sort', 'search', 'complexity', 'big o'],
-      'programming': ['code', 'function', 'variable', 'class', 'method', 'bug', 'debug', 'syntax'],
-      'system-design': ['scalability', 'database', 'architecture', 'microservice', 'load balancer', 'cache'],
-      'behavioral': ['interview', 'experience', 'situation', 'leadership', 'conflict', 'team'],
-      'sales': ['customer', 'deal', 'negotiation', 'price', 'revenue', 'prospect'],
-      'presentation': ['slide', 'audience', 'public speaking', 'presentation', 'nervous'],
-      'data-science': ['data', 'model', 'machine learning', 'statistics', 'analytics', 'python', 'pandas'],
-      'devops': ['deployment', 'ci/cd', 'docker', 'kubernetes', 'infrastructure', 'monitoring'],
-      'negotiation': ['negotiate', 'compromise', 'agreement', 'terms', 'conflict resolution']
+      dsa: ['algorithm', 'data structure', 'array', 'tree', 'graph', 'sort', 'search', 'complexity', 'big o'],
+      lld: ['class', 'object', 'interface', 'api', 'design', 'singleton', 'factory', 'thread', 'lock'],
+      hld: ['scalability', 'database', 'architecture', 'microservice', 'load balancer', 'cache', 'queue', 'shard']
     };
 
     const textLower = text.toLowerCase();
