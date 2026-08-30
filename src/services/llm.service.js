@@ -627,7 +627,7 @@ class LLMService {
     if (skill === 'lld') {
       return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen low-level design problem and give classes, APIs, and production-ready code.${langNote}`;
     }
-    return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen DSA problem and give the best solution with explanation and final code.${langNote}`;
+    return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen DSA problem fully: pattern, brute-force code, where that code fails, optimal approach and code, complexity, edge cases, and a dry run.${langNote}`;
   }
 
   async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
@@ -1074,6 +1074,7 @@ Always respond to the point, do not repeat the question or unnecessary informati
 - Use bullet points, examples, and explanations
 - Focus on actionable insights and complete answers
 - Do not truncate or shorten your response
+- For DSA problems, always include: brute-force code, where it fails, optimal code, complexity, edge cases, and a dry run
 
 ### Examples of casual/irrelevant messages:
 - "Hello", "Hi there", "How are you?"
@@ -1093,7 +1094,7 @@ Always respond to the point, do not repeat the question or unnecessary informati
 - Be encouraging and helpful
 - Stay focused on ${activeSkill}
 
-If the user's input is a coding or DSA problem statement and contains no code, produce a complete, runnable solution in the selected programming language without asking for more details. Always include the final implementation in a properly tagged code block.
+If the user's input is a coding or DSA problem statement and contains no code, solve it fully without asking for more details: brute-force code, failure cases, optimal code, complexity, edge cases, and a dry run.
 
 Remember: Be intelligent about filtering - only provide detailed responses when the user actually needs help with ${activeSkill}.`;
 
