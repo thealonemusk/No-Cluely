@@ -35,18 +35,50 @@ class LLMService {
     if (!Array.isArray(sessionMemory)) {
       return [];
     }
-    return sessionMemory
+    const mapped = sessionMemory
       .filter((event) => (
         event.role !== 'system' &&
         event.content &&
         typeof event.content === 'string' &&
         event.content.trim().length > 0
       ))
-      .slice(-8)
+      .slice(-16)
       .map((event) => ({
         role: event.role === 'model' || event.role === 'assistant' ? 'assistant' : 'user',
         content: event.content.trim()
       }));
+
+    const collapsed = [];
+    for (const message of mapped) {
+      const last = collapsed[collapsed.length - 1];
+      if (last && last.role === message.role) {
+        last.content = `${last.content}\n${message.content}`;
+      } else {
+        collapsed.push({ ...message });
+      }
+    }
+    return collapsed.slice(-8);
+  }
+
+  appendAlternateUserMessage(history, userText) {
+    const messages = history.map((message) => ({ ...message }));
+    const text = (userText || '').trim();
+    if (!text) {
+      return messages;
+    }
+
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'user') {
+      if (last.content === text || text.includes(last.content) || last.content.includes(text)) {
+        last.content = last.content.length >= text.length ? last.content : text;
+      } else {
+        last.content = `${last.content}\n${text}`;
+      }
+      return messages;
+    }
+
+    messages.push({ role: 'user', content: text });
+    return messages;
   }
 
   async runAlternateProvider({ kind, text, imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta }) {
@@ -75,7 +107,10 @@ class LLMService {
         systemPrompt = this.getIntelligentTranscriptionPrompt(activeSkill, programmingLanguage);
       }
 
-      const history = this.buildAlternateHistory(sessionMemory);
+      const history = this.appendAlternateUserMessage(
+        this.buildAlternateHistory(sessionMemory),
+        userText
+      );
       const providerMod = this.provider === 'cursor'
         ? require('./llm-providers/cursor.provider')
         : require('./llm-providers/claude.provider');
@@ -84,13 +119,19 @@ class LLMService {
         ? config.get('llm.cursor.timeout')
         : config.get('llm.claude.timeout');
 
+      const sessionManager = require('../managers/session.manager');
+      const latestShot = kind === 'image' ? null : sessionManager.getLatestScreenshot();
+      const attachedImage = kind === 'image'
+        ? imageBuffer
+        : (latestShot && latestShot.buffer) || null;
+
       const fullText = await providerMod.complete({
         apiKey: this.getAlternateApiKey(),
         model: this.model,
         system: systemPrompt,
-        messages: [...history, { role: 'user', content: userText }],
-        imageBuffer: kind === 'image' ? imageBuffer : null,
-        mimeType: mimeType || 'image/png',
+        messages: history,
+        imageBuffer: attachedImage,
+        mimeType: (kind === 'image' ? mimeType : latestShot && latestShot.mimeType) || 'image/png',
         onDelta: typeof onDelta === 'function' ? onDelta : null,
         timeout
       });
@@ -290,26 +331,13 @@ class LLMService {
       const { promptLoader } = require('../../prompt-loader');
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
 
-      // Build request with text + image parts
-      const base64 = imageBuffer.toString('base64');
-
-      const request = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              { inlineData: { data: base64, mimeType } }
-            ]
-          }
-        ]
-      };
-
-      this.applyGenerationDefaults(request);
-
-      if (skillPrompt && skillPrompt.trim().length > 0) {
-        request.systemInstruction = { parts: [{ text: skillPrompt }] };
-      }
+      const request = this.buildGeminiImageRequest(
+        imageBuffer,
+        mimeType,
+        activeSkill,
+        programmingLanguage,
+        skillPrompt
+      );
 
       // Execute with retries/timeout - try alternative method first for network reliability
       let responseText;
@@ -412,23 +440,13 @@ class LLMService {
     try {
       const { promptLoader } = require('../../prompt-loader');
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
-      const base64 = imageBuffer.toString('base64');
-
-      const geminiRequest = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: this.formatImageInstruction(activeSkill, programmingLanguage) },
-              { inlineData: { data: base64, mimeType } }
-            ]
-          }
-        ]
-      };
-      this.applyGenerationDefaults(geminiRequest);
-      if (skillPrompt && skillPrompt.trim().length > 0) {
-        geminiRequest.systemInstruction = { parts: [{ text: skillPrompt }] };
-      }
+      const geminiRequest = this.buildGeminiImageRequest(
+        imageBuffer,
+        mimeType,
+        activeSkill,
+        programmingLanguage,
+        skillPrompt
+      );
 
       const fullText = await this.executeStreamingRequest(geminiRequest, (delta) => {
         if (typeof onDelta === 'function' && delta) {
@@ -469,9 +487,114 @@ class LLMService {
     }
   }
 
+  collapseAdjacentGeminiTurns(contents) {
+    const collapsed = [];
+    for (const item of contents) {
+      const last = collapsed[collapsed.length - 1];
+      if (last && last.role === item.role) {
+        last.parts.push(...item.parts);
+      } else {
+        collapsed.push({
+          role: item.role,
+          parts: [...item.parts]
+        });
+      }
+    }
+    return collapsed;
+  }
+
+  conversationContentsFromHistory(conversationHistory, limit = 16) {
+    const events = Array.isArray(conversationHistory) ? conversationHistory : [];
+    const contents = events
+      .filter((event) => (
+        event.role !== 'system' &&
+        event.content &&
+        typeof event.content === 'string' &&
+        event.content.trim().length > 0
+      ))
+      .slice(-limit)
+      .map((event) => ({
+        role: event.role === 'model' || event.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: event.content.trim() }]
+      }));
+    return this.collapseAdjacentGeminiTurns(contents);
+  }
+
+  mergeCurrentUserTurn(contents, rawText, displayText) {
+    const raw = (rawText || '').trim();
+    const display = (displayText || raw).trim();
+    if (!display) {
+      return;
+    }
+
+    const last = contents[contents.length - 1];
+    const lastText = last && last.role === 'user'
+      ? (last.parts || []).map((part) => part.text || '').join('\n').trim()
+      : '';
+    const alreadyPresent = last && last.role === 'user' && lastText && (
+      lastText === raw ||
+      lastText === display ||
+      (raw && (raw.includes(lastText) || lastText.includes(raw)))
+    );
+
+    if (alreadyPresent) {
+      this.attachLatestScreenshotToParts(last.parts);
+      return;
+    }
+
+    const currentParts = [{ text: display }];
+    this.attachLatestScreenshotToParts(currentParts);
+    contents.push({
+      role: 'user',
+      parts: currentParts
+    });
+  }
+
+  attachLatestScreenshotToParts(parts) {
+    const sessionManager = require('../managers/session.manager');
+    const latest = sessionManager.getLatestScreenshot && sessionManager.getLatestScreenshot();
+    if (!latest || !latest.buffer) {
+      return parts;
+    }
+    parts.push({
+      inlineData: {
+        data: latest.buffer.toString('base64'),
+        mimeType: latest.mimeType || 'image/png'
+      }
+    });
+    return parts;
+  }
+
+  buildGeminiImageRequest(imageBuffer, mimeType, activeSkill, programmingLanguage, skillPrompt) {
+    const sessionManager = require('../managers/session.manager');
+    const conversationHistory = sessionManager.getConversationHistory(16);
+    const request = { contents: this.conversationContentsFromHistory(conversationHistory, 16) };
+    this.applyGenerationDefaults(request);
+    if (skillPrompt && skillPrompt.trim().length > 0) {
+      request.systemInstruction = { parts: [{ text: skillPrompt }] };
+    }
+
+    const imagePart = {
+      inlineData: {
+        data: imageBuffer.toString('base64'),
+        mimeType: mimeType || 'image/png'
+      }
+    };
+    const instruction = this.formatImageInstruction(activeSkill, programmingLanguage);
+    if (request.contents.length && request.contents[request.contents.length - 1].role === 'user') {
+      request.contents[request.contents.length - 1].parts.push({ text: instruction }, imagePart);
+    } else {
+      request.contents.push({
+        role: 'user',
+        parts: [{ text: instruction }, imagePart]
+      });
+    }
+    return request;
+  }
+
   formatImageInstruction(activeSkill, programmingLanguage) {
     const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
-    return `Analyze this image for a ${activeSkill.toUpperCase()} question. Extract the problem concisely and provide the best possible solution with explanation and final code.${langNote}`;
+    return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen ${activeSkill.toUpperCase()} problem and give the best solution with explanation and final code.${langNote}`;
   }
 
   async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
@@ -832,36 +955,14 @@ class LLMService {
       });
     }
 
-    // Add conversation history (excluding system messages) with validation
-    const conversationContents = conversationHistory
-      .filter(event => {
-        return event.role !== 'system' && 
-               event.content && 
-               typeof event.content === 'string' && 
-               event.content.trim().length > 0;
-      })
-      .map(event => {
-        const content = event.content.trim();
-        return {
-          role: event.role === 'model' ? 'model' : 'user',
-          parts: [{ text: content }]
-        };
-      });
+    request.contents.push(...this.conversationContentsFromHistory(conversationHistory, 16));
 
-    // Add the conversation history
-    request.contents.push(...conversationContents);
-
-    // Format and validate the current user input
     const formattedMessage = this.formatUserMessage(text, activeSkill);
     if (!formattedMessage || formattedMessage.trim().length === 0) {
       throw new Error('Failed to format user message or message is empty');
     }
 
-    // Add the current user input
-    request.contents.push({
-      role: 'user',
-      parts: [{ text: formattedMessage }]
-    });
+    this.mergeCurrentUserTurn(request.contents, text, formattedMessage);
 
     logger.debug('Built Gemini request with conversation history', {
       skill: activeSkill,
@@ -886,7 +987,7 @@ class LLMService {
     const sessionManager = require('../managers/session.manager');
     
     if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
-      const conversationHistory = sessionManager.getConversationHistory(10);
+      const conversationHistory = sessionManager.getConversationHistory(16);
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
       return this.buildIntelligentTranscriptionRequestWithHistory(cleanText, activeSkill, conversationHistory, skillContext, programmingLanguage);
     }
@@ -908,9 +1009,11 @@ class LLMService {
       parts: [{ text: intelligentPrompt }]
     };
 
+    const basicParts = [{ text: cleanText }];
+    this.attachLatestScreenshotToParts(basicParts);
     request.contents.push({
       role: 'user',
-      parts: [{ text: cleanText }]
+      parts: basicParts
     });
 
     logger.debug('Built basic intelligent transcription request', {
@@ -934,42 +1037,14 @@ class LLMService {
   const intelligentPrompt = this.getIntelligentTranscriptionPrompt(activeSkill, programmingLanguage);
   request.systemInstruction = { parts: [{ text: intelligentPrompt }] };
 
-    // Add recent conversation history (excluding system messages) with validation
-    const conversationContents = conversationHistory
-      .filter(event => {
-        // Filter out system messages and ensure content exists and is valid
-        return event.role !== 'system' && 
-               event.content && 
-               typeof event.content === 'string' && 
-               event.content.trim().length > 0;
-      })
-      .slice(-8) // Keep last 8 exchanges for context
-      .map(event => {
-        const content = event.content.trim();
-        if (!content) {
-          logger.warn('Empty content found in conversation history', { event });
-          return null;
-        }
-        return {
-          role: event.role === 'model' ? 'model' : 'user',
-          parts: [{ text: content }]
-        };
-      })
-      .filter(content => content !== null); // Remove any null entries
+    request.contents.push(...this.conversationContentsFromHistory(conversationHistory, 16));
 
-    // Add the conversation history
-    request.contents.push(...conversationContents);
-
-    // Validate and add the current transcription
     const cleanText = text && typeof text === 'string' ? text.trim() : '';
     if (!cleanText) {
       throw new Error('Empty or invalid transcription text provided');
     }
 
-    request.contents.push({
-      role: 'user',
-      parts: [{ text: cleanText }]
-    });
+    this.mergeCurrentUserTurn(request.contents, cleanText, cleanText);
 
     // Ensure we have at least one content item
     if (request.contents.length === 0) {
@@ -1014,7 +1089,8 @@ Always respond to the point, do not repeat the question or unnecessary informati
 - Respond with: "Yeah, I'm listening. Ask your question relevant to ${activeSkill}."
 - Or similar brief acknowledgments like: "I'm here, what's your ${activeSkill} question?"
 
-### If the transcription IS relevant to ${activeSkill} or is a follow-up question:
+### If the transcription IS relevant to ${activeSkill}, refers to a screenshot, or is a follow-up in this conversation:
+- Use the full session so far, including any attached screenshot
 - Provide a comprehensive, detailed response
 - Use bullet points, examples, and explanations
 - Focus on actionable insights and complete answers

@@ -10,6 +10,7 @@ class SessionManager {
     this.compressionThreshold = config.get('session.compressionThreshold');
     this.currentSkill = 'dsa'; // Default skill is DSA
     this.isInitialized = false;
+    this.latestScreenshot = null;
     
     this.initializeWithSkillPrompts();
   }
@@ -109,15 +110,35 @@ class SessionManager {
    * Add user transcription or chat input
    */
   addUserInput(text, source = 'chat') {
+    const action = source === 'speech'
+      ? 'speech_transcription'
+      : source === 'screenshot'
+        ? 'ocr_extraction'
+        : 'chat_input';
     return this.addConversationEvent({
       role: 'user',
       content: text,
-      action: source === 'speech' ? 'speech_transcription' : 'chat_input',
+      action,
       metadata: {
         source,
         textLength: text.length
       }
     });
+  }
+
+  setLatestScreenshot(imageBuffer, mimeType = 'image/png') {
+    if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+      this.latestScreenshot = null;
+      return;
+    }
+    this.latestScreenshot = {
+      buffer: imageBuffer,
+      mimeType: mimeType || 'image/png'
+    };
+  }
+
+  getLatestScreenshot() {
+    return this.latestScreenshot;
   }
 
   /**
@@ -580,6 +601,7 @@ class SessionManager {
     const eventCount = this.sessionMemory.length;
     this.sessionMemory = [];
     this.isInitialized = false;
+    this.latestScreenshot = null;
     
     logger.info('Session memory cleared', { eventCount });
     

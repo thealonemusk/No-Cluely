@@ -627,7 +627,7 @@ class ApplicationController {
       // answers using the active skill prompt and recent conversation history.
       (async () => {
         try {
-          const sessionHistory = sessionManager.getOptimizedHistory();
+          const sessionHistory = sessionManager.getConversationHistory(16);
           await this.processWithLLM(text, sessionHistory);
         } catch (error) {
           logger.error("Failed to process chat message with LLM", {
@@ -1083,8 +1083,16 @@ class ApplicationController {
         return;
       }
 
-      // Use image directly with LLM and active skill; do not send chat messages here
-      const sessionHistory = sessionManager.getOptimizedHistory();
+      sessionManager.setLatestScreenshot(capture.imageBuffer, capture.mimeType || 'image/png');
+      sessionManager.addUserInput(
+        'I captured a screenshot of the current problem. Continue our conversation and use this image together with everything we already discussed.',
+        'screenshot'
+      );
+      this.sendToVoiceResponseWindows("transcription-received", {
+        text: '[Screenshot] Analyze this with our current conversation.'
+      });
+
+      const sessionHistory = sessionManager.getConversationHistory(16);
 
       const skillsRequiringProgrammingLanguage = ['dsa'];
       const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
@@ -1100,7 +1108,7 @@ class ApplicationController {
         capture.imageBuffer,
         capture.mimeType || 'image/png',
         this.activeSkill,
-        sessionHistory.recent,
+        sessionHistory,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
@@ -1148,9 +1156,6 @@ class ApplicationController {
 
   async processWithLLM(text, sessionHistory) {
     try {
-      // Add user input to session memory
-      sessionManager.addUserInput(text, 'llm_input');
-
       // Check if current skill needs programming language context
       const skillsRequiringProgrammingLanguage = ['dsa'];
       const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
@@ -1166,7 +1171,7 @@ class ApplicationController {
       const llmResult = await llmService.processTextWithSkillStream(
         text,
         this.activeSkill,
-        sessionHistory.recent,
+        sessionHistory,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
@@ -1233,7 +1238,6 @@ class ApplicationController {
     }
 
     // Route speech UI events according to the user's response-target setting.
-    sessionManager.addUserInput(fragment, 'speech');
     this.sendToVoiceResponseWindows("transcription-received", { text: fragment });
 
     this._utteranceBuffer = this._utteranceBuffer
@@ -1275,7 +1279,8 @@ class ApplicationController {
     this._utteranceDispatchInFlight = true;
 
     try {
-      const sessionHistory = sessionManager.getOptimizedHistory();
+      sessionManager.addUserInput(combined, 'speech');
+      const sessionHistory = sessionManager.getConversationHistory(16);
       await this.processTranscriptionWithLLM(combined, sessionHistory);
     } catch (error) {
       logger.error("Failed to process transcription with LLM", {
@@ -1339,7 +1344,7 @@ class ApplicationController {
       const llmResult = await llmService.processTranscriptionWithIntelligentResponseStream(
         cleanText,
         this.activeSkill,
-        sessionHistory.recent,
+        sessionHistory,
         needsProgrammingLanguage ? this.codingLanguage : null,
         (delta) => {
           this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
