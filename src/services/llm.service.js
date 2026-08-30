@@ -3,6 +3,8 @@ const logger = require('../core/logger').createServiceLogger('LLM');
 const config = require('../core/config');
 const { promptLoader } = require('../../prompt-loader');
 
+const CONVERSATION_TURN_LIMIT = 16;
+
 class LLMService {
   constructor() {
     this.client = null;
@@ -29,6 +31,57 @@ class LLMService {
       return (process.env.CURSOR_API_KEY || '').trim();
     }
     return (process.env.ANTHROPIC_API_KEY || '').trim();
+  }
+
+  getSessionManager() {
+    return require('../managers/session.manager');
+  }
+
+  isGeminiModelUnavailable(error, errorInfo = null) {
+    const message = (error && error.message) || '';
+    if (errorInfo && errorInfo.type === 'RATE_LIMIT_ERROR') {
+      return true;
+    }
+    return message.includes('503') ||
+      message.includes('UNAVAILABLE') ||
+      message.includes('high demand');
+  }
+
+  isGeminiQuotaOrUnavailable(error) {
+    const message = (error && error.message) || '';
+    return this.isGeminiModelUnavailable(error) ||
+      message.includes('quota') ||
+      message.includes('rate limit');
+  }
+
+  async executeGeminiWithTransportFallback(request) {
+    const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
+    try {
+      if (preferAlternative) {
+        logger.debug('Attempting alternative HTTPS method first for reliability');
+        return await this.executeAlternativeRequest(request);
+      }
+      return await this.executeRequest(request);
+    } catch (error) {
+      const secondaryLabel = preferAlternative ? 'primary SDK method' : 'alternative HTTPS method';
+      logger.warn(`${preferAlternative ? 'Alternative' : 'Primary'} method failed, trying ${secondaryLabel}`, {
+        error: error.message,
+        requestId: this.requestCount
+      });
+      const secondaryFn = preferAlternative
+        ? this.executeRequest.bind(this)
+        : this.executeAlternativeRequest.bind(this);
+      try {
+        return await secondaryFn(request);
+      } catch (secondaryError) {
+        logger.error('Both Gemini request methods failed', {
+          firstError: error.message,
+          secondError: secondaryError.message,
+          requestId: this.requestCount
+        });
+        throw secondaryError;
+      }
+    }
   }
 
   buildAlternateHistory(sessionMemory) {
@@ -119,7 +172,7 @@ class LLMService {
         ? config.get('llm.cursor.timeout')
         : config.get('llm.claude.timeout');
 
-      const sessionManager = require('../managers/session.manager');
+      const sessionManager = this.getSessionManager();
       const latestShot = kind === 'image' ? null : sessionManager.getLatestScreenshot();
       const attachedImage = kind === 'image'
         ? imageBuffer
@@ -327,8 +380,6 @@ class LLMService {
     this.requestCount++;
 
     try {
-      // Build system instruction using the skill prompt (with optional language injection)
-      const { promptLoader } = require('../../prompt-loader');
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
 
       const request = this.buildGeminiImageRequest(
@@ -339,31 +390,7 @@ class LLMService {
         skillPrompt
       );
 
-      // Execute with retries/timeout - try alternative method first for network reliability
-      let responseText;
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
-      try {
-        if (preferAlternative) {
-          logger.debug('Attempting alternative HTTPS method first for reliability');
-          responseText = await this.executeAlternativeRequest(request);
-        } else {
-          responseText = await this.executeRequest(request);
-        }
-      } catch (error) {
-        const secondaryLabel = preferAlternative ? 'primary SDK method' : 'alternative HTTPS method';
-        logger.warn(`${preferAlternative ? 'Alternative' : 'Primary'} method failed, trying ${secondaryLabel}`, { error: error.message });
-        const secondaryFn = preferAlternative ? this.executeRequest.bind(this) : this.executeAlternativeRequest.bind(this);
-
-        try {
-          responseText = await secondaryFn(request);
-        } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed', {
-            firstError: error.message,
-            secondError: secondaryError.message
-          });
-          throw secondaryError;
-        }
-      }
+      const responseText = await this.executeGeminiWithTransportFallback(request);
 
       // Enforce language in code fences if provided
       const finalResponse = programmingLanguage
@@ -438,7 +465,6 @@ class LLMService {
     this.requestCount++;
 
     try {
-      const { promptLoader } = require('../../prompt-loader');
       const skillPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
       const geminiRequest = this.buildGeminiImageRequest(
         imageBuffer,
@@ -503,7 +529,7 @@ class LLMService {
     return collapsed;
   }
 
-  conversationContentsFromHistory(conversationHistory, limit = 16) {
+  conversationContentsFromHistory(conversationHistory, limit = CONVERSATION_TURN_LIMIT) {
     const events = Array.isArray(conversationHistory) ? conversationHistory : [];
     const contents = events
       .filter((event) => (
@@ -551,7 +577,7 @@ class LLMService {
   }
 
   attachLatestScreenshotToParts(parts) {
-    const sessionManager = require('../managers/session.manager');
+    const sessionManager = this.getSessionManager();
     const latest = sessionManager.getLatestScreenshot && sessionManager.getLatestScreenshot();
     if (!latest || !latest.buffer) {
       return parts;
@@ -566,9 +592,9 @@ class LLMService {
   }
 
   buildGeminiImageRequest(imageBuffer, mimeType, activeSkill, programmingLanguage, skillPrompt) {
-    const sessionManager = require('../managers/session.manager');
-    const conversationHistory = sessionManager.getConversationHistory(16);
-    const request = { contents: this.conversationContentsFromHistory(conversationHistory, 16) };
+    const sessionManager = this.getSessionManager();
+    const conversationHistory = sessionManager.getConversationHistory(CONVERSATION_TURN_LIMIT);
+    const request = { contents: this.conversationContentsFromHistory(conversationHistory, CONVERSATION_TURN_LIMIT) };
     this.applyGenerationDefaults(request);
     if (skillPrompt && skillPrompt.trim().length > 0) {
       request.systemInstruction = { parts: [{ text: skillPrompt }] };
@@ -625,34 +651,7 @@ class LLMService {
       });
 
       const geminiRequest = this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage);
-
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
-      let response;
-      try {
-        if (preferAlternative) {
-          logger.debug('Attempting alternative HTTPS method first for text processing');
-          response = await this.executeAlternativeRequest(geminiRequest);
-        } else {
-          response = await this.executeRequest(geminiRequest);
-        }
-      } catch (error) {
-        const secondaryLabel = preferAlternative ? 'primary SDK method' : 'alternative HTTPS method';
-        logger.warn(`${preferAlternative ? 'Alternative' : 'Primary'} method failed, trying ${secondaryLabel}`, {
-          error: error.message,
-          requestId: this.requestCount
-        });
-        const secondaryFn = preferAlternative ? this.executeRequest.bind(this) : this.executeAlternativeRequest.bind(this);
-        try {
-          response = await secondaryFn(geminiRequest);
-        } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed for text processing', {
-            firstError: error.message,
-            secondError: secondaryError.message,
-            requestId: this.requestCount
-          });
-          throw secondaryError;
-        }
-      }
+      const response = await this.executeGeminiWithTransportFallback(geminiRequest);
       
       // Enforce language in code fences if programmingLanguage specified
       const finalResponse = programmingLanguage
@@ -789,34 +788,7 @@ class LLMService {
       });
 
       const geminiRequest = this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage);
-
-      const preferAlternative = !!config.get('llm.gemini.enableFallbackMethod');
-      let response;
-      try {
-        if (preferAlternative) {
-          logger.debug('Attempting alternative HTTPS method first for transcription processing');
-          response = await this.executeAlternativeRequest(geminiRequest);
-        } else {
-          response = await this.executeRequest(geminiRequest);
-        }
-      } catch (error) {
-        const secondaryLabel = preferAlternative ? 'primary SDK method' : 'alternative HTTPS method';
-        logger.warn(`${preferAlternative ? 'Alternative' : 'Primary'} method failed, trying ${secondaryLabel}`, {
-          error: error.message,
-          requestId: this.requestCount
-        });
-        const secondaryFn = preferAlternative ? this.executeRequest.bind(this) : this.executeAlternativeRequest.bind(this);
-        try {
-          response = await secondaryFn(geminiRequest);
-        } catch (secondaryError) {
-          logger.error('Both Gemini request methods failed for transcription processing', {
-            firstError: error.message,
-            secondError: secondaryError.message,
-            requestId: this.requestCount
-          });
-          throw secondaryError;
-        }
-      }
+      const response = await this.executeGeminiWithTransportFallback(geminiRequest);
       
       // Enforce language in code fences if programmingLanguage specified
       const finalResponse = programmingLanguage
@@ -889,10 +861,10 @@ class LLMService {
 
   buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage) {
     // Check if we have the new conversation history format
-    const sessionManager = require('../managers/session.manager');
+    const sessionManager = this.getSessionManager();
     
     if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
-      const conversationHistory = sessionManager.getConversationHistory(15);
+      const conversationHistory = sessionManager.getConversationHistory(CONVERSATION_TURN_LIMIT);
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
       return this.buildGeminiRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage);
     }
@@ -984,10 +956,10 @@ class LLMService {
     }
 
     // Check if we have the new conversation history format
-    const sessionManager = require('../managers/session.manager');
+    const sessionManager = this.getSessionManager();
     
     if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
-      const conversationHistory = sessionManager.getConversationHistory(16);
+      const conversationHistory = sessionManager.getConversationHistory(CONVERSATION_TURN_LIMIT);
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
       return this.buildIntelligentTranscriptionRequestWithHistory(cleanText, activeSkill, conversationHistory, skillContext, programmingLanguage);
     }
@@ -1219,12 +1191,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
 
           // For model-unavailable / overloaded / rate-limit errors, move to
           // the next fallback model immediately instead of burning all retries.
-          const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
-            error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
-
-          if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
+          if (this.isGeminiModelUnavailable(error, errorInfo) && modelName !== modelsToTry[modelsToTry.length - 1]) {
             logger.info(`Switching to fallback model after ${modelName} unavailable`, {
               model: modelName,
               error: error.message
@@ -1395,12 +1362,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
             model: modelName
           });
 
-          const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
-            error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
-
-          if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
+          if (this.isGeminiModelUnavailable(error, errorInfo) && modelName !== modelsToTry[modelsToTry.length - 1]) {
             break; // try next fallback model
           }
 
@@ -1492,27 +1454,6 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
       req.write(postData);
       req.end();
     });
-  }
-
-  async performPreflightCheck() {
-    // Quick connectivity check
-    try {
-      const startTime = Date.now();
-      await this.testNetworkConnection({ 
-        host: 'generativelanguage.googleapis.com', 
-        port: 443, 
-        name: 'Gemini API Endpoint' 
-      });
-      const latency = Date.now() - startTime;
-      
-      logger.debug('Preflight check passed', { latency });
-    } catch (error) {
-      logger.warn('Preflight check failed', { 
-        error: error.message,
-        suggestion: 'Network connectivity issue detected before API call'
-      });
-      // Don't throw here - let the actual API call fail with more detail
-    }
   }
 
   getUserAgent() {
@@ -1806,13 +1747,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
             model: modelName
           });
 
-          const isModelUnavailable = error.message.includes('503') ||
-            error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand') ||
-            error.message.includes('quota') ||
-            error.message.includes('rate limit');
-
-          if (!isModelUnavailable && modelName === this.model) {
+          if (!this.isGeminiQuotaOrUnavailable(error) && modelName === this.model) {
             // Primary model failed for a non-availability reason; don't hide it
             break;
           }
@@ -1921,11 +1856,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           model: modelName
         });
 
-        const isModelUnavailable = error.message.includes('503') ||
-          error.message.includes('UNAVAILABLE') ||
-          error.message.includes('high demand');
-
-        if (!isModelUnavailable && modelName === primaryModel) {
+        if (!this.isGeminiModelUnavailable(error) && modelName === primaryModel) {
           break;
         }
       }

@@ -1200,7 +1200,7 @@ class SpeechService extends EventEmitter {
   }
 
   isManualCaptureMode() {
-    return this.provider === 'whisper' && this._getWhisperCaptureMode() === 'manual';
+    return this.provider === 'whisper' && this._isManualCaptureMode();
   }
 
   shutdown() {

@@ -107,6 +107,9 @@ const llmService = require("./src/services/llm.service");
 // Managers
 const windowManager = require("./src/managers/window.manager");
 const sessionManager = require("./src/managers/session.manager");
+const { promptLoader } = require("./prompt-loader");
+
+const SESSION_TURN_LIMIT = 16;
 
 class ApplicationController {
   constructor() {
@@ -143,16 +146,66 @@ class ApplicationController {
     this._whisperInstaller = null;
     this.isFirstRun = false;
 
-    // Window configurations for reference
-    this.windowConfigs = {
-      main: { title: "No-Cluely" },
-      chat: { title: "Chat" },
-      llmResponse: { title: "AI Response" },
-      settings: { title: "Settings" },
-    };
-
     this.setupStealth();
     this.setupEventHandlers();
+  }
+
+  applyStealthIdentity() {
+    if (app && typeof app.setName === "function") {
+      app.setName("Terminal ");
+    }
+    process.title = "Terminal ";
+  }
+
+  getSessionTurns() {
+    return sessionManager.getConversationHistory(SESSION_TURN_LIMIT);
+  }
+
+  getSkillProgrammingLanguage() {
+    return promptLoader.requiresProgrammingLanguage(this.activeSkill)
+      ? this.codingLanguage
+      : null;
+  }
+
+  nextMessageId(prefix) {
+    this._responseSeq = (this._responseSeq || 0) + 1;
+    return `${prefix}-${Date.now()}-${this._responseSeq}`;
+  }
+
+  persistAssistantTurn(llmResult, extra = {}) {
+    sessionManager.addModelResponse(llmResult.response, {
+      skill: this.activeSkill,
+      processingTime: llmResult.metadata.processingTime,
+      usedFallback: llmResult.metadata.usedFallback,
+      ...extra
+    });
+  }
+
+  showOverlayAnswer(llmResult, extra = {}) {
+    windowManager.showLLMResponse(llmResult.response, {
+      skill: this.activeSkill,
+      processingTime: llmResult.metadata.processingTime,
+      usedFallback: llmResult.metadata.usedFallback,
+      ...extra
+    });
+  }
+
+  buildLlmBroadcastPayload(llmResult) {
+    return {
+      response: llmResult.response,
+      metadata: llmResult.metadata,
+      messageId: llmResult.metadata && llmResult.metadata.messageId,
+      skill: this.activeSkill,
+      isTranscriptionResponse: true
+    };
+  }
+
+  broadcastSpeechAvailability() {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send("speech-availability", { available: this.speechAvailable });
+      }
+    });
   }
 
   setupStealth() {
@@ -160,11 +213,7 @@ class ApplicationController {
       process.title = config.get("app.processTitle");
     }
 
-    // Set default stealth app name early
-    if (app && typeof app.setName === 'function') {
-      app.setName("Terminal ");
-    }
-    process.title = "Terminal ";
+    this.applyStealthIdentity();
 
     if (
       process.platform === "darwin" &&
@@ -225,9 +274,7 @@ class ApplicationController {
     }
     this.starting = true;
 
-    // Force stealth mode IMMEDIATELY when app is ready
-    app.setName("Terminal ");
-    process.title = "Terminal ";
+    this.applyStealthIdentity();
 
     logger.info("Application starting", {
       version: config.get("app.version"),
@@ -282,7 +329,7 @@ class ApplicationController {
               error: e.message
             });
             // Fallback to legacy settings prompt
-            try { this.showSettings(); } catch (_) { /* ignore */ }
+            try { windowManager.showSettings(); } catch (_) { /* ignore */ }
           }
         }, 800);
       } else {
@@ -439,10 +486,7 @@ class ApplicationController {
       BrowserWindow.getAllWindows().forEach((window) => {
         window.webContents.send("speech-status", { status, available: this.speechAvailable });
       });
-      // Also broadcast availability specifically
-      BrowserWindow.getAllWindows().forEach((window) => {
-        window.webContents.send("speech-availability", { available: this.speechAvailable });
-      });
+      this.broadcastSpeechAvailability();
     });
 
     speechService.on("error", (error) => {
@@ -501,33 +545,13 @@ class ApplicationController {
       speechService.stopRecording();
     });
 
-    ipcMain.on("chat-window-ready", () => {
-      // Send a test message to confirm communication
-      setTimeout(() => {
-        windowManager.broadcastToAllWindows("transcription-received", {
-          text: "Test message from main process - chat window communication is working!",
-        });
-      }, 1000);
-    });
-
     ipcMain.on("main-window-ready", () => {
       // Re-check availability whenever the main overlay finishes loading;
       // this covers first-run where the window was hidden during onboarding.
       this.speechAvailable = speechService.isAvailable
         ? speechService.isAvailable()
         : false;
-      const { BrowserWindow } = require("electron");
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send("speech-availability", { available: this.speechAvailable });
-        }
-      });
-    });
-
-    ipcMain.on("test-chat-window", () => {
-      windowManager.broadcastToAllWindows("transcription-received", {
-        text: "🧪 IMMEDIATE TEST: Chat window IPC communication test successful!",
-      });
+      this.broadcastSpeechAvailability();
     });
 
     ipcMain.handle("show-all-windows", () => {
@@ -601,8 +625,7 @@ class ApplicationController {
     });
 
     ipcMain.handle("clear-session-memory", () => {
-      sessionManager.clear();
-      windowManager.broadcastToAllWindows("session-cleared");
+      this.clearSessionMemory();
       return { success: true };
     });
 
@@ -627,8 +650,7 @@ class ApplicationController {
       // answers using the active skill prompt and recent conversation history.
       (async () => {
         try {
-          const sessionHistory = sessionManager.getConversationHistory(16);
-          await this.processWithLLM(text, sessionHistory);
+          await this.processWithLLM(text, this.getSessionTurns());
         } catch (error) {
           logger.error("Failed to process chat message with LLM", {
             error: error.message,
@@ -642,9 +664,7 @@ class ApplicationController {
 
     ipcMain.handle("get-skill-prompt", (event, skillName) => {
       try {
-        const { promptLoader } = require('./prompt-loader');
-        const skillPrompt = promptLoader.getSkillPrompt(skillName);
-        return skillPrompt;
+        return promptLoader.getSkillPrompt(skillName);
       } catch (error) {
         logger.error('Failed to get skill prompt', { skillName, error: error.message });
         return null;
@@ -755,12 +775,7 @@ class ApplicationController {
         // and API keys are configured.
         await windowManager.showMainWindow();
         // Broadcast speech availability so the mic button appears
-        const { BrowserWindow } = require("electron");
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send("speech-availability", { available: this.speechAvailable });
-          }
-        });
+        this.broadcastSpeechAvailability();
         return { success: true };
       } catch (e) {
         return { success: false, error: e.message };
@@ -862,26 +877,21 @@ class ApplicationController {
 
     ipcMain.handle("close-window", (event) => {
       const webContents = event.sender;
-      const window = windowManager.windows.forEach((win, type) => {
+      for (const win of windowManager.windows.values()) {
         if (win.webContents === webContents) {
           win.hide();
-          return true;
+          break;
         }
-      });
+      }
       return { success: true };
     });
 
-    // LLM window specific handlers
-    ipcMain.handle("expand-llm-window", (event, contentMetrics) => {
+    const resizeLlmWindow = (_event, contentMetrics) => {
       windowManager.expandLLMWindow(contentMetrics);
       return { success: true, contentMetrics };
-    });
-
-    ipcMain.handle("resize-llm-window-for-content", (event, contentMetrics) => {
-      // Use the same expansion logic for now, can be enhanced later
-      windowManager.expandLLMWindow(contentMetrics);
-      return { success: true, contentMetrics };
-    });
+    };
+    ipcMain.handle("expand-llm-window", resizeLlmWindow);
+    ipcMain.handle("resize-llm-window-for-content", resizeLlmWindow);
 
     ipcMain.handle("quit-app", () => {
       logger.info("Quit app requested via IPC");
@@ -976,7 +986,7 @@ class ApplicationController {
     try {
       sessionManager.clear();
       windowManager.broadcastToAllWindows("session-cleared");
-      logger.info("Session memory cleared via global shortcut");
+      logger.info("Session memory cleared");
     } catch (error) {
       logger.error("Error clearing session memory:", error);
     }
@@ -1027,9 +1037,7 @@ class ApplicationController {
   }
 
   navigateSkill(direction) {
-    const availableSkills = [
-      "dsa",
-    ];
+    const availableSkills = promptLoader.getAvailableSkills();
 
     const currentIndex = availableSkills.indexOf(this.activeSkill);
     if (currentIndex === -1) {
@@ -1092,13 +1100,9 @@ class ApplicationController {
         text: '[Screenshot] Analyze this with our current conversation.'
       });
 
-      const sessionHistory = sessionManager.getConversationHistory(16);
-
-      const skillsRequiringProgrammingLanguage = ['dsa'];
-      const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
-
-      this._responseSeq = (this._responseSeq || 0) + 1;
-      const messageId = `img-${Date.now()}-${this._responseSeq}`;
+      const sessionHistory = this.getSessionTurns();
+      const programmingLanguage = this.getSkillProgrammingLanguage();
+      const messageId = this.nextMessageId("img");
       windowManager.broadcastToAllWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
@@ -1106,10 +1110,10 @@ class ApplicationController {
 
       const llmResult = await llmService.processImageWithSkillStream(
         capture.imageBuffer,
-        capture.mimeType || 'image/png',
+        capture.mimeType || "image/png",
         this.activeSkill,
         sessionHistory,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+        programmingLanguage,
         (delta) => {
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
@@ -1119,21 +1123,9 @@ class ApplicationController {
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
-      sessionManager.addModelResponse(llmResult.response, {
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-        isImageAnalysis: true
-      });
-
+      this.persistAssistantTurn(llmResult, { isImageAnalysis: true });
       this.broadcastTranscriptionLLMResponse(llmResult);
-
-      windowManager.showLLMResponse(llmResult.response, {
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-        isImageAnalysis: true
-      });
+      this.showOverlayAnswer(llmResult, { isImageAnalysis: true });
     } catch (error) {
       logger.error("Screenshot OCR process failed", {
         error: error.message,
@@ -1156,12 +1148,8 @@ class ApplicationController {
 
   async processWithLLM(text, sessionHistory) {
     try {
-      // Check if current skill needs programming language context
-      const skillsRequiringProgrammingLanguage = ['dsa'];
-      const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
-
-      this._responseSeq = (this._responseSeq || 0) + 1;
-      const messageId = `chat-${Date.now()}-${this._responseSeq}`;
+      const programmingLanguage = this.getSkillProgrammingLanguage();
+      const messageId = this.nextMessageId("chat");
       windowManager.broadcastToAllWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
@@ -1172,7 +1160,7 @@ class ApplicationController {
         text,
         this.activeSkill,
         sessionHistory,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+        programmingLanguage,
         (delta) => {
           windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
             messageId,
@@ -1185,25 +1173,14 @@ class ApplicationController {
       logger.info("LLM processing completed, showing response", {
         responseLength: llmResult.response.length,
         skill: this.activeSkill,
-        programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : 'not applicable',
+        programmingLanguage: programmingLanguage || "not applicable",
         processingTime: llmResult.metadata.processingTime,
         responsePreview: llmResult.response.substring(0, 200) + "...",
       });
 
-      // Add LLM response to session memory
-      sessionManager.addModelResponse(llmResult.response, {
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-      });
-
+      this.persistAssistantTurn(llmResult);
       this.broadcastTranscriptionLLMResponse(llmResult);
-
-      windowManager.showLLMResponse(llmResult.response, {
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-      });
+      this.showOverlayAnswer(llmResult);
     } catch (error) {
       logger.error("LLM processing failed", {
         error: error.message,
@@ -1279,9 +1256,8 @@ class ApplicationController {
     this._utteranceDispatchInFlight = true;
 
     try {
-      sessionManager.addUserInput(combined, 'speech');
-      const sessionHistory = sessionManager.getConversationHistory(16);
-      await this.processTranscriptionWithLLM(combined, sessionHistory);
+      sessionManager.addUserInput(combined, "speech");
+      await this.processTranscriptionWithLLM(combined, this.getSessionTurns());
     } catch (error) {
       logger.error("Failed to process transcription with LLM", {
         error: error.message,
@@ -1325,15 +1301,8 @@ class ApplicationController {
         textPreview: cleanText.substring(0, 100) + "..."
       });
 
-      // Check if current skill needs programming language context
-      const skillsRequiringProgrammingLanguage = ['dsa'];
-      const needsProgrammingLanguage = skillsRequiringProgrammingLanguage.includes(this.activeSkill);
-
-      // Stream the answer progressively to the configured speech target.
-      // A unique messageId ties the start/chunk/final events to one bubble so
-      // the UI never duplicates or interleaves concurrent responses.
-      this._responseSeq = (this._responseSeq || 0) + 1;
-      messageId = `tr-${Date.now()}-${this._responseSeq}`;
+      const programmingLanguage = this.getSkillProgrammingLanguage();
+      messageId = this.nextMessageId("tr");
       this.sendToVoiceResponseWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
@@ -1345,7 +1314,7 @@ class ApplicationController {
         cleanText,
         this.activeSkill,
         sessionHistory,
-        needsProgrammingLanguage ? this.codingLanguage : null,
+        programmingLanguage,
         (delta) => {
           this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
@@ -1355,28 +1324,16 @@ class ApplicationController {
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
-      // Add LLM response to session memory
-      sessionManager.addModelResponse(llmResult.response, {
-        skill: this.activeSkill,
-        processingTime: llmResult.metadata.processingTime,
-        usedFallback: llmResult.metadata.usedFallback,
-        isTranscriptionResponse: true
-      });
-
+      this.persistAssistantTurn(llmResult, { isTranscriptionResponse: true });
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       if (this.shouldShowVoiceOverlay()) {
-        windowManager.showLLMResponse(llmResult.response, {
-          skill: this.activeSkill,
-          processingTime: llmResult.metadata.processingTime,
-          usedFallback: llmResult.metadata.usedFallback,
-          isTranscriptionResponse: true
-        });
+        this.showOverlayAnswer(llmResult, { isTranscriptionResponse: true });
       }
 
       logger.info("Transcription LLM response completed", {
         responseLength: llmResult.response.length,
         skill: this.activeSkill,
-        programmingLanguage: needsProgrammingLanguage ? this.codingLanguage : 'not applicable',
+        programmingLanguage: programmingLanguage || "not applicable",
         processingTime: llmResult.metadata.processingTime
       });
 
@@ -1397,22 +1354,14 @@ class ApplicationController {
           fallbackResult.metadata = { ...fallbackResult.metadata, messageId };
         }
 
-        sessionManager.addModelResponse(fallbackResult.response, {
-          skill: this.activeSkill,
-          processingTime: fallbackResult.metadata.processingTime,
-          usedFallback: true,
+        this.persistAssistantTurn(fallbackResult, {
           isTranscriptionResponse: true,
           fallbackReason: error.message
         });
 
         this.sendTranscriptionLLMResponseToVoiceTargets(fallbackResult);
         if (this.shouldShowVoiceOverlay()) {
-          windowManager.showLLMResponse(fallbackResult.response, {
-            skill: this.activeSkill,
-            processingTime: fallbackResult.metadata.processingTime,
-            usedFallback: true,
-            isTranscriptionResponse: true
-          });
+          this.showOverlayAnswer(fallbackResult, { isTranscriptionResponse: true });
         }
         logger.info("Used fallback response for transcription", {
           skill: this.activeSkill,
@@ -1437,35 +1386,11 @@ class ApplicationController {
     }
   }
 
-  broadcastOCRSuccess(ocrResult) {
-    windowManager.broadcastToAllWindows("ocr-completed", {
-      text: ocrResult.text,
-      metadata: ocrResult.metadata,
-    });
-  }
-
   broadcastOCRError(errorMessage) {
     windowManager.broadcastToAllWindows("ocr-error", {
       error: errorMessage,
       timestamp: new Date().toISOString(),
     });
-  }
-
-  broadcastLLMSuccess(llmResult) {
-    const broadcastData = {
-      response: llmResult.response,
-      metadata: llmResult.metadata,
-      skill: this.activeSkill, // Add the current active skill to the top level
-    };
-
-    logger.info("Broadcasting LLM success to all windows", {
-      responseLength: llmResult.response.length,
-      skill: this.activeSkill,
-      dataKeys: Object.keys(broadcastData),
-      responsePreview: llmResult.response.substring(0, 100) + "...",
-    });
-
-    windowManager.broadcastToAllWindows("llm-response", broadcastData);
   }
 
   broadcastLLMError(errorMessage) {
@@ -1476,13 +1401,7 @@ class ApplicationController {
   }
 
   broadcastTranscriptionLLMResponse(llmResult) {
-    const broadcastData = {
-      response: llmResult.response,
-      metadata: llmResult.metadata,
-      messageId: llmResult.metadata && llmResult.metadata.messageId,
-      skill: this.activeSkill,
-      isTranscriptionResponse: true
-    };
+    const broadcastData = this.buildLlmBroadcastPayload(llmResult);
 
     logger.info("Broadcasting transcription LLM response to all windows", {
       responseLength: llmResult.response.length,
@@ -1525,14 +1444,7 @@ class ApplicationController {
   }
 
   sendTranscriptionLLMResponseToVoiceTargets(llmResult) {
-    const data = {
-      response: llmResult.response,
-      metadata: llmResult.metadata,
-      messageId: llmResult.metadata && llmResult.metadata.messageId,
-      skill: this.activeSkill,
-      isTranscriptionResponse: true
-    };
-    this.sendToVoiceResponseWindows("transcription-llm-response", data);
+    this.sendToVoiceResponseWindows("transcription-llm-response", this.buildLlmBroadcastPayload(llmResult));
   }
 
   onWindowAllClosed() {
@@ -1743,15 +1655,7 @@ class ApplicationController {
           this.speechAvailable = speechService.isAvailable
             ? speechService.isAvailable()
             : false;
-          // Broadcast so any open window (settings, overlay, chat)
-          // can react immediately — especially the main overlay's
-          // mic button, which queries availability on load.
-          const { BrowserWindow } = require("electron");
-          BrowserWindow.getAllWindows().forEach((win) => {
-            if (!win.isDestroyed()) {
-              win.webContents.send("speech-availability", { available: this.speechAvailable });
-            }
-          });
+          this.broadcastSpeechAvailability();
           logger.info('Speech service reinitialized after settings change', {
             providerChanged,
             whisperCommandChanged,
@@ -1773,12 +1677,6 @@ class ApplicationController {
       logger.error("Failed to save settings", { error: error.message });
       return { success: false, error: error.message };
     }
-  }
-
-  persistSettings(settings) {
-    // You can extend this to save to a file or database
-    // For now, we'll just keep them in memory
-    logger.debug("Settings persisted", settings);
   }
 
   /**

@@ -6,6 +6,22 @@ const logger = {
     warn: (...args) => console.warn('[MainWindowUI WARN]', ...args)
 };
 
+const SKILL_DISPLAY_NAMES = {
+    dsa: 'DSA',
+    behavioral: 'Behavioral',
+    sales: 'Sales',
+    presentation: 'Presentation',
+    'data-science': 'Data Science',
+    programming: 'Programming',
+    devops: 'DevOps',
+    'system-design': 'System Design',
+    negotiation: 'Negotiation'
+};
+
+function getSkillDisplayName(skill) {
+    return SKILL_DISPLAY_NAMES[skill] || String(skill || '').toUpperCase();
+}
+
 class MainWindowUI {
     constructor() {
         this.isInteractive = false;
@@ -521,19 +537,7 @@ class MainWindowUI {
 
     handleLLMResponse(data) {
         const skill = data.skill || data.metadata?.skill || 'General';
-        const skillNames = {
-            'dsa': 'DSA',
-            'behavioral': 'Behavioral', 
-            'sales': 'Sales',
-            'presentation': 'Presentation',
-            'data-science': 'Data Science',
-            'programming': 'Programming',
-            'devops': 'DevOps',
-            'system-design': 'System Design',
-            'negotiation': 'Negotiation'
-        };
-        
-        const displaySkill = skillNames[skill] || skill.toUpperCase();
+        const displaySkill = getSkillDisplayName(skill);
         
         logger.info('LLM response received', {
             component: 'MainWindowUI',
@@ -755,18 +759,6 @@ class MainWindowUI {
     }
 
     updateSkillIndicator() {
-        const skillNames = {
-            'dsa': 'DSA',
-            'behavioral': 'Behavioral', 
-            'sales': 'Sales',
-            'presentation': 'Presentation',
-            'data-science': 'Data Science',
-            'programming': 'Programming',
-            'devops': 'DevOps',
-            'system-design': 'System Design',
-            'negotiation': 'Negotiation'
-        };
-        
         logger.info('Updating skill indicator', {
             component: 'MainWindowUI',
             currentSkill: this.currentSkill,
@@ -778,7 +770,7 @@ class MainWindowUI {
             return;
         }
         
-        const skillName = skillNames[this.currentSkill] || this.currentSkill.toUpperCase();
+        const skillName = getSkillDisplayName(this.currentSkill);
         const skillSpan = this.skillIndicator.querySelector('span');
         
         logger.info('Looking for skill span element', {
@@ -868,19 +860,7 @@ class MainWindowUI {
     }
 
     showSkillChangeNotification(skill, direction) {
-        const skillNames = {
-            'dsa': 'DSA',
-            'behavioral': 'Behavioral', 
-            'sales': 'Sales',
-            'presentation': 'Presentation',
-            'data-science': 'Data Science',
-            'programming': 'Programming',
-            'devops': 'DevOps',
-            'system-design': 'System Design',
-            'negotiation': 'Negotiation'
-        };
-        
-        const displayName = skillNames[skill] || skill.toUpperCase();
+        const displayName = getSkillDisplayName(skill);
         const arrow = direction > 0 ? '↓' : '↑';
         
         // Create temporary notification

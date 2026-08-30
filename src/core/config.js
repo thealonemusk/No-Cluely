@@ -130,10 +130,6 @@ class ConfigManager {
     const envKey = `${service.toUpperCase()}_API_KEY`;
     return process.env[envKey];
   }
-
-  isFeatureEnabled(feature) {
-    return this.get(`features.${feature}`) !== false;
-  }
 }
 
 module.exports = new ConfigManager();

@@ -93,11 +93,6 @@ class WindowManager {
       }
     };
 
-    this.init();
-  }
-
-  init() {
-    // ... existing initialization code ...
   }
 
   async initializeWindows(options = {}) {
@@ -1718,15 +1713,6 @@ class WindowManager {
   // - enforceAllWindowProperties()
   // - enforceAlwaysOnTop()
 
-  // Public methods for manual screen sharing control
-  enableScreenSharingMode() {
-    this.startScreenSharingMode();
-  }
-
-  disableScreenSharingMode() {
-    this.stopScreenSharingMode();
-  }
-
   isInScreenSharingMode() {
     return this.isScreenBeingShared;
   }
@@ -1807,18 +1793,6 @@ class WindowManager {
     logger.debug('Recording stopped, chat window kept visible for the response');
   }
 
-  broadcastSkillChange(skill) {
-    this.windows.forEach((window, type) => {
-      if (!window.isDestroyed()) {
-        window.webContents.send('skill-changed', { skill });
-      }
-    });
-    
-    logger.info('Skill change broadcasted to all windows', { 
-      skill,
-      windowCount: this.windows.size 
-    });
-    }
 }
 
 module.exports = new WindowManager();

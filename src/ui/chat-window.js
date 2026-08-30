@@ -122,25 +122,11 @@ class ChatWindowUI {
             window.electronAPI.onSessionCleared(() => {
                 this.addMessage('Session memory has been cleared', 'system');
             });
-            
-            window.electronAPI.onOcrCompleted((event, data) => {
-                if (data.text && data.text.trim()) {
-                    this.addMessage(`📷 OCR Result: ${data.text}`, 'transcription');
-                }
-            });
-            
+
             window.electronAPI.onOcrError((event, data) => {
                 this.addMessage(`OCR Error: ${data.error}`, 'error');
             });
-            
-            window.electronAPI.onLlmResponse((event, data) => {
-                // Store AI response (text + snippets) in chat history
-                if (data && data.response) {
-                    this.hideThinkingIndicator?.();
-                    this.renderAssistantResponse(data.response);
-                }
-            });
-            
+
             window.electronAPI.onLlmError((event, data) => {
                 this.addMessage(`LLM Error: ${data.error}`, 'error');
             });

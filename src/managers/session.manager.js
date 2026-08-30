@@ -157,22 +157,6 @@ class SessionManager {
   }
 
   /**
-   * Add OCR extracted text
-   */
-  addOCREvent(extractedText, metadata = {}) {
-    return this.addConversationEvent({
-      role: 'user',
-      content: extractedText,
-      action: 'ocr_extraction',
-      metadata: {
-        ...metadata,
-        source: 'screenshot',
-        textLength: extractedText.length
-      }
-    });
-  }
-
-  /**
    * Create a conversation event with consistent structure
    */
   createConversationEvent({ role, content, skill, action, metadata = {} }) {
@@ -212,29 +196,12 @@ class SessionManager {
   /**
    * Get conversation history for LLM context
    */
-  getConversationHistory(maxEntries = 20) {
+  getConversationHistory(maxEntries = 16) {
     // Get recent conversation events (excluding system initialization)
     const conversationEvents = this.sessionMemory
       .filter(event => event.role !== 'system' || !event.metadata?.isInitialization)
       .slice(-maxEntries);
     
-    return conversationEvents.map(event => ({
-      role: event.role,
-      content: event.content,
-      timestamp: event.timestamp,
-      skill: event.skill,
-      action: event.action
-    }));
-  }
-
-  /**
-   * Get the entire conversation history (excluding initialization system messages)
-   * This is useful when the model needs complete context for each new message.
-   */
-  getFullConversationHistory() {
-    const conversationEvents = this.sessionMemory
-      .filter(event => event.role !== 'system' || !event.metadata?.isInitialization);
-
     return conversationEvents.map(event => ({
       role: event.role,
       content: event.content,
