@@ -692,7 +692,9 @@ class SpeechService extends EventEmitter {
       this.whisperWorker.warmup({
         model: this._getWhisperModel(),
         modelDir: this._getWhisperModelDir(),
-        device: this._getWhisperDevice()
+        device: this._getWhisperDevice(),
+        computeType: this._getWhisperComputeType(),
+        cpuThreads: this._getWhisperCpuThreads()
       }).then((result) => {
         logger.info('Whisper GPU warmup completed while recording', {
           model: result.model,
@@ -1244,7 +1246,7 @@ class SpeechService extends EventEmitter {
   }
 
   _getWhisperModel() {
-    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || config.get('speech.whisper.model') || 'small';
+    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || config.get('speech.whisper.model') || 'base';
   }
 
   _getWhisperModelDir() {
@@ -1349,6 +1351,20 @@ class SpeechService extends EventEmitter {
 
   _getWhisperDevice() {
     return String(process.env.WHISPER_DEVICE || 'auto').trim().toLowerCase();
+  }
+
+  _getWhisperComputeType() {
+    return String(process.env.WHISPER_COMPUTE_TYPE || 'auto').trim().toLowerCase();
+  }
+
+  _getWhisperCpuThreads() {
+    const parsed = Number(process.env.WHISPER_CPU_THREADS || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  }
+
+  _getWhisperBeamSize() {
+    const parsed = Number(process.env.WHISPER_BEAM_SIZE || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
   }
 
   _getWhisperPythonPath() {
@@ -1870,7 +1886,10 @@ class SpeechService extends EventEmitter {
       model: this._getWhisperModel(),
       language: this._getWhisperLanguage(),
       modelDir: this._getWhisperModelDir(),
-      device: this._getWhisperDevice()
+      device: this._getWhisperDevice(),
+      computeType: this._getWhisperComputeType(),
+      cpuThreads: this._getWhisperCpuThreads(),
+      beamSize: this._getWhisperBeamSize()
     });
     logger.info('Persistent Whisper transcription completed', {
       processingTime: Date.now() - startedAt,

@@ -17,6 +17,7 @@ model_name = None
 model_dir = None
 model_device = None
 model_compute_type = None
+model_cpu_threads = None
 
 
 def send(payload):
@@ -58,24 +59,47 @@ def resolve_compute_type(device, requested):
     return 'float16' if device == 'cuda' else 'int8'
 
 
+def resolve_cpu_threads(requested):
+    try:
+        value = int(requested)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    logical = os.cpu_count() or 4
+    return max(1, logical // 2)
+
+
+def resolve_beam_size(requested, device):
+    try:
+        value = int(requested)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    return 1 if device == 'cpu' else 5
+
+
 def unload_model():
-    global model, model_name, model_dir, model_device, model_compute_type
+    global model, model_name, model_dir, model_device, model_compute_type, model_cpu_threads
     model = None
     model_name = None
     model_dir = None
     model_device = None
     model_compute_type = None
+    model_cpu_threads = None
     gc.collect()
 
 
 def ensure_model(request):
-    global model, model_name, model_dir, model_device, model_compute_type
-    requested_name = request.get('model') or 'small'
+    global model, model_name, model_dir, model_device, model_compute_type, model_cpu_threads
+    requested_name = request.get('model') or 'base'
     requested_dir = request.get('model_dir') or None
     requested_device = resolve_device(request.get('device') or 'auto')
     requested_compute = resolve_compute_type(
         requested_device, request.get('compute_type') or 'auto'
     )
+    requested_threads = resolve_cpu_threads(request.get('cpu_threads'))
 
     if (
         model is None
@@ -83,11 +107,13 @@ def ensure_model(request):
         or model_dir != requested_dir
         or model_device != requested_device
         or model_compute_type != requested_compute
+        or model_cpu_threads != requested_threads
     ):
         unload_model()
         kwargs = {
             'device': requested_device,
             'compute_type': requested_compute,
+            'cpu_threads': requested_threads,
         }
         if requested_dir:
             kwargs['download_root'] = requested_dir
@@ -96,6 +122,7 @@ def ensure_model(request):
         model_dir = requested_dir
         model_device = requested_device
         model_compute_type = requested_compute
+        model_cpu_threads = requested_threads
 
     return model, requested_device, requested_compute
 
@@ -137,11 +164,12 @@ def transcribe(request):
     if language in ('auto', 'detect'):
         language = None
 
+    beam_size = resolve_beam_size(request.get('beam_size'), device)
     segments, info = loaded_model.transcribe(
         load_audio_input(request['audio_path']),
         language=language,
         task='transcribe',
-        beam_size=5,
+        beam_size=beam_size,
         temperature=0,
         condition_on_previous_text=False,
         without_timestamps=True,
@@ -152,6 +180,8 @@ def transcribe(request):
         'language': getattr(info, 'language', None),
         'device': device,
         'compute_type': compute_type,
+        'cpu_threads': model_cpu_threads,
+        'beam_size': beam_size,
         'model': model_name,
         'cuda_available': cuda_available(),
         'gpu': gpu_name(),
@@ -188,6 +218,7 @@ for raw_line in sys.stdin:
                 'warmed': True,
                 'device': device,
                 'compute_type': compute_type,
+                'cpu_threads': model_cpu_threads,
                 'model': model_name,
                 'cuda_available': cuda_available(),
                 'gpu': gpu_name(),
