@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const EMPTY_CWD = path.join(os.tmpdir(), 'opencluely-cursor-empty');
+const EMPTY_CWD = path.join(os.tmpdir(), 'No-Cluely-cursor-empty');
 
 function ensureEmptyCwd() {
   fs.mkdirSync(EMPTY_CWD, { recursive: true });

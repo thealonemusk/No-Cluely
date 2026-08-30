@@ -1,5 +1,5 @@
 {
-  "name": "opencluely",
+  "name": "No-Cluely",
   "version": "1.0.0",
   "description": "AI Problem Solving Assistant",
   "main": "main.js",
@@ -20,13 +20,13 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "author": {
-    "name": "TechyCSR",
-    "email": "info@techycsr.dev",
-    "url": "https://techycsr.dev"
+    "name": "thealonemusk",
+    "email": "info@thealonemusk.tech",
+    "url": "https://thealonemusk.tech"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/TechyCSR/OpenCluely"
+    "url": "https://github.com/thealonemusk/No-Cluely"
   },
   "license": "ISC",
   "dependencies": {
@@ -47,8 +47,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.opencluely.app",
-    "productName": "OpenCluely",
+    "appId": "com.No-Cluely.app",
+    "productName": "No-Cluely",
     "directories": {
       "output": "dist"
     },
@@ -92,9 +92,9 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "OpenCluely uses the microphone to transcribe your speech locally with Whisper.",
-        "NSCameraUsageDescription": "OpenCluely does not record video; this entitlement is only present for media-capture compatibility.",
-        "NSScreenCaptureUsageDescription": "OpenCluely captures the screen to read on-screen content for AI assistance."
+        "NSMicrophoneUsageDescription": "No-Cluely uses the microphone to transcribe your speech locally with Whisper.",
+        "NSCameraUsageDescription": "No-Cluely does not record video; this entitlement is only present for media-capture compatibility.",
+        "NSScreenCaptureUsageDescription": "No-Cluely captures the screen to read on-screen content for AI assistance."
       }
     },
     "win": {
@@ -163,10 +163,10 @@
       "perMachine": false,
       "include": "scripts/post-install-nsis.nsh",
       "deleteAppDataOnUninstall": false,
-      "artifactName": "OpenCluely-Setup-${version}.${ext}"
+      "artifactName": "No-Cluely-Setup-${version}.${ext}"
     },
     "dmg": {
-      "title": "OpenCluely Interview Assistant",
+      "title": "No-Cluely Interview Assistant",
       "backgroundColor": "#000000",
       "window": {
         "width": 600,

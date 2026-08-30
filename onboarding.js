@@ -548,9 +548,9 @@
 
   $('#starBtn').addEventListener('click', () => {
     if (window.electronAPI && window.electronAPI.openExternal) {
-      window.electronAPI.openExternal('https://github.com/TechyCSR/OpenCluely');
+      window.electronAPI.openExternal('https://github.com/thealonemusk/No-Cluely');
     } else {
-      window.open('https://github.com/TechyCSR/OpenCluely', '_blank');
+      window.open('https://github.com/thealonemusk/No-Cluely', '_blank');
     }
   });
   $('#skipStarBtn').addEventListener('click', () => {

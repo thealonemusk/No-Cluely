@@ -1,14 +1,14 @@
-/* OpenCluely — humans.txt
-   https://opencluely.techycsr.dev/humans.txt
+/* No-Cluely — humans.txt
+   https://No-Cluely.thealonemusk.tech/humans.txt
 */
 
-# humans.txt — credits the people behind OpenCluely.
+# humans.txt — credits the people behind No-Cluely.
 
 # TEAM
 
-  Developer & maintainer: TechyCSR
-  Site: https://techycsr.dev
-  GitHub: https://github.com/TechyCSR
+  Developer & maintainer: thealonemusk
+  Site: https://thealonemusk.tech
+  GitHub: https://github.com/thealonemusk
 
 # SITE
 

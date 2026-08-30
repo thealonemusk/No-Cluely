@@ -1865,7 +1865,7 @@ class SpeechService extends EventEmitter {
   }
 
   async _transcribeWhisperBuffer(audioBuffer) {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencluely-whisper-'));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'No-Cluely-whisper-'));
     const audioFilePath = path.join(tempDir, 'segment.wav');
 
     try {

@@ -55,7 +55,7 @@ function formatEnvValue(raw) {
 // exhaust the X11 client limit, producing "Maximum number of clients reached".
 //
 // Disabling hardware acceleration and the GPU subprocess forces Chromium to
-// render via the CPU (SwiftShader). OpenCluely's UI is light enough that
+// render via the CPU (SwiftShader). No-Cluely's UI is light enough that
 // this is imperceptible, and it eliminates the GPU crash entirely.
 if (process.platform === "linux") {
   app.disableHardwareAcceleration();
@@ -136,7 +136,7 @@ class ApplicationController {
       // any directory). ENV_PATH is the same file dotenv loaded at startup
       // and that persistEnvUpdates() writes to.
       envPath: ENV_PATH,
-      sentinelPath: path.join(app.getPath("userData"), ".opencluely-firstrun-completed"),
+      sentinelPath: path.join(app.getPath("userData"), ".No-Cluely-firstrun-completed"),
     });
     // Lazily-initialised in getWhisperInstaller() so tests can mock
     // the constructor without polluting main-process startup.
@@ -145,7 +145,7 @@ class ApplicationController {
 
     // Window configurations for reference
     this.windowConfigs = {
-      main: { title: "OpenCluely" },
+      main: { title: "No-Cluely" },
       chat: { title: "Chat" },
       llmResponse: { title: "AI Response" },
       settings: { title: "Settings" },

@@ -6,7 +6,7 @@ const os = require('os');
  * First-run detection and onboarding helper.
  *
  * Responsibilities:
- *   - Decide whether this is the user's first launch of OpenCluely
+ *   - Decide whether this is the user's first launch of No-Cluely
  *   - Auto-create a default `.env` from `env.example` if one is missing
    *   - Report whether the selected provider's API key is configured
  *   - Persist a "first-run completed" sentinel so we don't nag on every launch
@@ -19,7 +19,7 @@ class FirstRunManager {
   constructor(options = {}) {
     this.cwd = options.cwd || process.cwd();
     this.envPath = options.envPath || path.join(this.cwd, '.env');
-    this.sentinelPath = options.sentinelPath || path.join(this.cwd, '.opencluely-firstrun-completed');
+    this.sentinelPath = options.sentinelPath || path.join(this.cwd, '.No-Cluely-firstrun-completed');
     this.logger = options.logger || console;
   }
 
@@ -156,7 +156,7 @@ class FirstRunManager {
       } catch (_) { /* try next */ }
     }
     return [
-      '# OpenCluely configuration',
+      '# No-Cluely configuration',
       '# Add your API key below — the app picks it up immediately.',
       '# Get a Gemini key from: https://aistudio.google.com/',
       '',

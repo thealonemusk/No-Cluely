@@ -333,10 +333,10 @@ class WhisperInstaller {
       log(`✓ ffmpeg detected (${ffmpeg.path})`);
     } else {
       const ffmpegMsg = this.platform === 'win32'
-        ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `winget install ffmpeg` only if you need other formats.'
+        ? 'ffmpeg not found — optional for No-Cluely (we always pass WAV audio). Install later with `winget install ffmpeg` only if you need other formats.'
         : this.platform === 'darwin'
-          ? 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `brew install ffmpeg` only if you need other formats.'
-          : 'ffmpeg not found — optional for OpenCluely (we always pass WAV audio). Install later with `sudo apt install ffmpeg` only if you need other formats.';
+          ? 'ffmpeg not found — optional for No-Cluely (we always pass WAV audio). Install later with `brew install ffmpeg` only if you need other formats.'
+          : 'ffmpeg not found — optional for No-Cluely (we always pass WAV audio). Install later with `sudo apt install ffmpeg` only if you need other formats.';
       log(`! ${ffmpegMsg}`);
     }
 
