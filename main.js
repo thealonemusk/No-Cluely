@@ -127,6 +127,7 @@ class ApplicationController {
     this._utteranceTimer = null;
     this._utteranceDispatchInFlight = false;
     this._utteranceCoalesceMs = 250;
+    this._workId = 0;
 
     // First-run onboarding: detects missing .env / API key and triggers
     // a settings-window prompt on first launch so users don't have to
@@ -453,6 +454,7 @@ class ApplicationController {
       "Control+Down": () => this.handleDownArrow(),
       "Control+Left": () => this.handleLeftArrow(),
       "Control+Right": () => this.handleRightArrow(),
+      Escape: () => this.cancelInFlightWork(),
     };
 
     Object.entries(shortcuts).forEach(([accelerator, handler]) => {
@@ -1082,6 +1084,7 @@ class ApplicationController {
     }
 
     const startTime = Date.now();
+    const workId = this.beginWork("capturing");
 
     try {
       this.openChatForAnswer();
@@ -1089,9 +1092,14 @@ class ApplicationController {
 
   const capture = await captureService.captureAndProcess();
 
+      if (!this.isWorkCurrent(workId)) {
+        return;
+      }
+
       if (!capture.imageBuffer || !capture.imageBuffer.length) {
         windowManager.hideLLMResponse();
         this.broadcastOCRError("Failed to capture screenshot image");
+        this.broadcastAppStatus("error");
         return;
       }
 
@@ -1100,9 +1108,13 @@ class ApplicationController {
         'I captured a screenshot of the current problem. Continue our conversation and use this image together with everything we already discussed.',
         'screenshot'
       );
+      this.sendToChatWindow("screenshot-preview", {
+        dataUrl: `data:${capture.mimeType || "image/png"};base64,${capture.imageBuffer.toString("base64")}`
+      });
       this.sendToVoiceResponseWindows("transcription-received", {
         text: '[Screenshot] Analyze this with our current conversation.'
       });
+      this.broadcastAppStatus("thinking");
 
       const sessionHistory = this.getSessionTurns();
       const programmingLanguage = this.getSkillProgrammingLanguage();
@@ -1127,9 +1139,13 @@ class ApplicationController {
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
+      if (!this.isWorkCurrent(workId)) {
+        return;
+      }
       this.persistAssistantTurn(llmResult, { isImageAnalysis: true });
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       this.finishOverlayStatus(llmResult, { isImageAnalysis: true });
+      this.endWork(workId);
     } catch (error) {
       logger.error("Screenshot OCR process failed", {
         error: error.message,
@@ -1151,6 +1167,7 @@ class ApplicationController {
   }
 
   async processWithLLM(text, sessionHistory) {
+    const workId = this.beginWork("thinking");
     try {
       const programmingLanguage = this.getSkillProgrammingLanguage();
       const messageId = this.nextMessageId("chat");
@@ -1183,9 +1200,13 @@ class ApplicationController {
         responsePreview: llmResult.response.substring(0, 200) + "...",
       });
 
+      if (!this.isWorkCurrent(workId)) {
+        return;
+      }
       this.persistAssistantTurn(llmResult);
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       this.finishOverlayStatus(llmResult);
+      this.endWork(workId);
     } catch (error) {
       logger.error("LLM processing failed", {
         error: error.message,
@@ -1316,6 +1337,7 @@ class ApplicationController {
         textPreview: cleanText.substring(0, 100) + "..."
       });
 
+      const workId = this.beginWork("thinking");
       const programmingLanguage = this.getSkillProgrammingLanguage();
       messageId = this.nextMessageId("tr");
       this.openChatForAnswer();
@@ -1340,9 +1362,13 @@ class ApplicationController {
       );
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
+      if (!this.isWorkCurrent(workId)) {
+        return;
+      }
       this.persistAssistantTurn(llmResult, { isTranscriptionResponse: true });
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       this.finishOverlayStatus(llmResult, { isTranscriptionResponse: true });
+      this.endWork(workId);
 
       logger.info("Transcription LLM response completed", {
         responseLength: llmResult.response.length,
@@ -1716,6 +1742,35 @@ class ApplicationController {
    * @param {Object<string, string>} updates - keys to upsert
    * @returns {string[]} keys that were actually persisted
    */
+  broadcastAppStatus(text) {
+    windowManager.broadcastToAllWindows("app-status", { text: text || "" });
+  }
+
+  beginWork(status) {
+    this._workId += 1;
+    this.broadcastAppStatus(status);
+    return this._workId;
+  }
+
+  isWorkCurrent(workId) {
+    return workId === this._workId;
+  }
+
+  endWork(workId) {
+    if (!this.isWorkCurrent(workId)) {
+      return false;
+    }
+    this.broadcastAppStatus("");
+    return true;
+  }
+
+  cancelInFlightWork() {
+    this._workId += 1;
+    this.broadcastAppStatus("cancelled");
+    windowManager.hideLLMResponse();
+    setTimeout(() => this.broadcastAppStatus(""), 1200);
+  }
+
   persistSkillAndLanguage() {
     this.persistEnvUpdates({
       ACTIVE_SKILL: this.activeSkill,

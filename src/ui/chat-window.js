@@ -74,6 +74,14 @@ class ChatWindowUI {
             });
             
             // Speech recognition handlers
+            if (window.electronAPI.onScreenshotPreview) {
+                window.electronAPI.onScreenshotPreview((event, data) => {
+                    if (data && data.dataUrl) {
+                        this.addScreenshotPreview(data.dataUrl);
+                    }
+                });
+            }
+
             window.electronAPI.onTranscriptionReceived((event, data) => {
                 if (data && data.text) {
                     this.handleTranscription(data.text);
@@ -314,6 +322,29 @@ class ChatWindowUI {
             
             logger.debug('User message sent', { textLength: text.length });
         }
+    }
+
+    addScreenshotPreview(dataUrl) {
+        if (!this.elements.chatMessages || !dataUrl) return;
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message user';
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'message-time';
+        timeDiv.textContent = new Date().toLocaleTimeString();
+        const textDiv = document.createElement('div');
+        textDiv.className = 'message-text';
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.alt = 'Last screenshot';
+        img.style.maxWidth = '160px';
+        img.style.maxHeight = '90px';
+        img.style.borderRadius = '6px';
+        img.style.display = 'block';
+        textDiv.appendChild(img);
+        messageDiv.appendChild(timeDiv);
+        messageDiv.appendChild(textDiv);
+        this.elements.chatMessages.appendChild(messageDiv);
+        this.elements.chatMessages.scrollTop = this.elements.chatMessages.scrollHeight;
     }
 
     addMessage(text, type = 'user') {        

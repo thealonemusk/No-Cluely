@@ -12,6 +12,11 @@ const SKILL_DISPLAY_NAMES = {
     lld: 'LLD',
     hld: 'HLD'
 };
+const SKILL_ICONS = {
+    dsa: 'fa-brain',
+    lld: 'fa-cubes',
+    hld: 'fa-sitemap'
+};
 
 function resolveSkill(skill) {
     const key = String(skill || '').toLowerCase().trim();
@@ -287,6 +292,7 @@ class MainWindowUI {
 
     setupElements() {
         this.statusDot = document.getElementById('statusDot');
+        this.barStatus = document.getElementById('barStatus');
         this.skillIndicator = document.getElementById('skillIndicator');
         this.settingsIndicator = document.getElementById('settingsIndicator'); // Optional
         this.micButton = document.getElementById('micButton');
@@ -348,6 +354,8 @@ class MainWindowUI {
 
         // Language dropdown
         this.languageSelect = document.getElementById('codingLanguage');
+        this.languageSelector = document.getElementById('languageSelector');
+        this.languageSeparator = document.getElementById('languageSeparator');
         if (this.languageSelect) {
             // Set default to C++ if no value is set
             this.languageSelect.value = 'cpp';
@@ -459,6 +467,12 @@ class MainWindowUI {
             });
 
             // Listen for coding language changes from other windows
+            if (window.electronAPI.onAppStatus) {
+                window.electronAPI.onAppStatus((event, data) => {
+                    this.setBarStatus(data && data.text);
+                });
+            }
+
             window.electronAPI.onCodingLanguageChanged((event, data) => {
                 if (data && data.language && this.languageSelect) {
                     // avoid clobbering if same value
@@ -767,6 +781,11 @@ class MainWindowUI {
         
         const skillName = getSkillDisplayName(this.currentSkill);
         const skillSpan = this.skillIndicator.querySelector('span');
+        const skillIcon = this.skillIndicator.querySelector('i');
+        if (skillIcon) {
+            skillIcon.className = `fas ${SKILL_ICONS[resolveSkill(this.currentSkill)] || 'fa-brain'}`;
+        }
+        this.updateLanguageVisibility();
         
         logger.info('Looking for skill span element', {
             component: 'MainWindowUI',
@@ -795,6 +814,23 @@ class MainWindowUI {
         } else {
             logger.error('Skill span element not found within skill indicator!');
         }
+    }
+
+    setBarStatus(text) {
+        if (!this.barStatus) return;
+        this.barStatus.textContent = text || '';
+        this.resizeWindowToContent();
+    }
+
+    updateLanguageVisibility() {
+        const showLanguage = resolveSkill(this.currentSkill) !== 'hld';
+        if (this.languageSelector) {
+            this.languageSelector.style.display = showLanguage ? '' : 'none';
+        }
+        if (this.languageSeparator) {
+            this.languageSeparator.style.display = showLanguage ? '' : 'none';
+        }
+        this.resizeWindowToContent();
     }
 
     animateSkillChange() {
