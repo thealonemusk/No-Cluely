@@ -43,7 +43,7 @@ class ConfigManager {
         claude: {
           model: 'claude-opus-5',
           timeout: 30000,
-          maxOutputTokens: 4096
+          maxOutputTokens: 8192
         },
         cursor: {
           model: 'grok-4.6',
@@ -60,7 +60,7 @@ class ConfigManager {
             temperature: 0.7,
             topK: 32,
             topP: 0.9,
-            maxOutputTokens: 4096,
+            maxOutputTokens: 8192,
             thinkingConfig: { thinkingBudget: 0 }
           }
         }

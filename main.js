@@ -1247,6 +1247,12 @@ class ApplicationController {
    * running, leave the buffer intact and let that dispatch's completion pick it
    * up — so we never pile up overlapping requests for the same person talking.
    */
+  isCasualUtterance(text) {
+    const clean = String(text || "").trim().toLowerCase();
+    if (!clean) return true;
+    return /^(hi|hello|hey|ok|okay|yeah|yes|no|thanks|thank you|hmm+|uh+|um+)$/.test(clean);
+  }
+
   async dispatchCoalescedUtterance() {
     if (this._utteranceDispatchInFlight) {
       return;
@@ -1259,6 +1265,10 @@ class ApplicationController {
     this._utteranceDispatchInFlight = true;
 
     try {
+      if (this.isCasualUtterance(combined)) {
+        logger.debug("Skipping casual utterance", { text: combined });
+        return;
+      }
       sessionManager.addUserInput(combined, "speech");
       await this.processTranscriptionWithLLM(combined, this.getSessionTurns());
     } catch (error) {
@@ -1313,7 +1323,7 @@ class ApplicationController {
       if (this.shouldShowVoiceOverlay()) {
         windowManager.showLLMLoading();
       }
-      const llmResult = await llmService.processTranscriptionWithIntelligentResponseStream(
+      const llmResult = await llmService.processTextWithSkillStream(
         cleanText,
         this.activeSkill,
         sessionHistory,
