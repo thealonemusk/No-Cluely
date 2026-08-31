@@ -682,7 +682,7 @@
           <div class="recording-indicator" id="recordingIndicator"></div>
         </div>
         <div class="header-actions">
-          <button class="icon-button" id="clearHistoryBtn" title="Clear chat history">
+          <button class="icon-button" id="clearHistoryBtn" title="New problem — clear chat and session">
             <i class="fas fa-trash"></i>
           </button>
         </div>
@@ -789,15 +789,27 @@
         }
       }
 
-      function clearChatHistory(skipConfirm = false) {
-        if (!skipConfirm) {
-          const ok = confirm('Clear chat history?');
-          if (!ok) return;
-        }
+      function showEmptyHint() {
+        if (!chatMessages || chatMessages.children.length > 0) return;
+        addMessage('Ask about the current problem, press Alt+R to talk, or take a screenshot.', 'system', true);
+      }
+
+      function resetChatUi() {
         chatHistory = [];
         saveHistory();
-        // Clear DOM
         if (chatMessages) chatMessages.innerHTML = '';
+        showEmptyHint();
+      }
+
+      function clearChatHistory(skipConfirm = false) {
+        if (!skipConfirm) {
+          const ok = confirm('Start a new problem? This clears chat and session memory.');
+          if (!ok) return;
+        }
+        resetChatUi();
+        if (whysperAPI && whysperAPI.clearSessionMemory) {
+          whysperAPI.clearSessionMemory();
+        }
       }
 
       function applyMicVisibility() {
@@ -836,15 +848,15 @@
         });
       }
 
-      // Clear on session-cleared from main
       if (whysperAPI && whysperAPI.onSessionCleared) {
         whysperAPI.onSessionCleared(() => {
-          clearChatHistory(true);
+          resetChatUi();
         });
       }
 
       // Initialize availability and history
       loadHistory();
+      if (!chatHistory.length) showEmptyHint();
       initSpeechAvailability();
 
       // Basic message function with markdown support for assistant messages
@@ -882,6 +894,29 @@
           chatHistory.push({ kind: 'message', type, text });
           saveHistory();
         }
+      }
+
+      function addScreenshotPreview(dataUrl) {
+        if (!chatMessages || !dataUrl) return;
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message user';
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'message-time';
+        timeDiv.textContent = new Date().toLocaleTimeString();
+        const textDiv = document.createElement('div');
+        textDiv.className = 'message-text';
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.alt = 'Last screenshot';
+        img.style.maxWidth = '160px';
+        img.style.maxHeight = '90px';
+        img.style.borderRadius = '6px';
+        img.style.display = 'block';
+        textDiv.appendChild(img);
+        messageDiv.appendChild(timeDiv);
+        messageDiv.appendChild(textDiv);
+        chatMessages.appendChild(messageDiv);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
       }
 
       // Markdown formatter using markdown.js library
@@ -1176,7 +1211,7 @@
         // Listen for speech errors
         whysperAPI.onSpeechError((event, data) => {
           if (data && data.error) {
-            addMessage(`Error in recognizing speech`, 'error');
+            addMessage(data.error, 'error');
             handleRecordingStopped();
           }
         });
@@ -1190,9 +1225,23 @@
           handleRecordingStopped();
         });
 
-        whysperAPI.onSessionCleared(() => {
-          addMessage('Session memory has been cleared', 'system');
-        });
+        if (whysperAPI.onScreenshotPreview) {
+          whysperAPI.onScreenshotPreview((event, data) => {
+            if (data && data.dataUrl) addScreenshotPreview(data.dataUrl);
+          });
+        }
+
+        if (whysperAPI.onOcrError) {
+          whysperAPI.onOcrError((event, data) => {
+            if (data && data.error) addMessage(data.error, 'error');
+          });
+        }
+
+        if (whysperAPI.onLlmError) {
+          whysperAPI.onLlmError((event, data) => {
+            if (data && data.error) addMessage(data.error, 'error');
+          });
+        }
 
         // Replace transcription LLM handler to store text + snippets
         whysperAPI.onTranscriptionLlmResponse((event, data) => {

@@ -44,7 +44,6 @@ class MainWindowUI {
         this.micButton = null;
         this.isRecording = false;
         this.speechAvailable = false; // track availability
-        this._popoverHideTimeout = null;
         // Renderer-side audio capture state (used for Whisper on Windows)
         this._audioContext = null;
         this._mediaStream = null;
@@ -85,6 +84,7 @@ class MainWindowUI {
             if (window.electronAPI && window.electronAPI.notifyMainWindowReady) {
                 window.electronAPI.notifyMainWindowReady();
             }
+            this.maybeShowClickHint();
             
         } catch (error) {
             logger.error('Failed to initialize main window UI', {
@@ -402,24 +402,6 @@ class MainWindowUI {
                 e.stopPropagation();
                 this.toggleShortcutsPopover();
             });
-
-            // Hover to show
-            this.infoButton.addEventListener('mouseenter', () => {
-                if (!this.isInteractive) return;
-                this.showShortcutsPopover();
-            });
-            // Queue hide when leaving the button
-            this.infoButton.addEventListener('mouseleave', () => this.queueHideShortcutsPopover());
-
-            // Keep open when hovering popover
-            this.shortcutsPopover.addEventListener('mouseenter', () => {
-                if (this._popoverHideTimeout) {
-                    clearTimeout(this._popoverHideTimeout);
-                    this._popoverHideTimeout = null;
-                }
-            });
-            // Hide after a small delay when leaving popover
-            this.shortcutsPopover.addEventListener('mouseleave', () => this.queueHideShortcutsPopover());
 
             // Close on outside click
             document.addEventListener('click', (e) => {
@@ -814,6 +796,21 @@ class MainWindowUI {
         } else {
             logger.error('Skill span element not found within skill indicator!');
         }
+    }
+
+    maybeShowClickHint() {
+        try {
+            if (localStorage.getItem('oc-alt-a-hint') === '1') {
+                return;
+            }
+            localStorage.setItem('oc-alt-a-hint', '1');
+        } catch (_) {
+            return;
+        }
+        setTimeout(() => {
+            this.setBarStatus('Alt+A to click the bar');
+            setTimeout(() => this.setBarStatus(''), 4500);
+        }, 800);
     }
 
     setBarStatus(text) {
@@ -1250,26 +1247,14 @@ class MainWindowUI {
 
     showShortcutsPopover() {
         if (!this.shortcutsPopover) return;
-        if (this._popoverHideTimeout) {
-            clearTimeout(this._popoverHideTimeout);
-            this._popoverHideTimeout = null;
-        }
-    this.shortcutsPopover.classList.add('is-open');
-        // Resize main window to fit popover
+        this.shortcutsPopover.classList.add('is-open');
         setTimeout(() => this.resizeWindowToContent(), 50);
     }
 
     hideShortcutsPopover() {
         if (!this.shortcutsPopover) return;
-    this.shortcutsPopover.classList.remove('is-open');
-    // resize back to compact after transition
-    setTimeout(() => this.resizeWindowToContent(), 130);
-    }
-
-    queueHideShortcutsPopover() {
-        if (!this.shortcutsPopover) return;
-        if (this._popoverHideTimeout) clearTimeout(this._popoverHideTimeout);
-        this._popoverHideTimeout = setTimeout(() => this.hideShortcutsPopover(), 180);
+        this.shortcutsPopover.classList.remove('is-open');
+        setTimeout(() => this.resizeWindowToContent(), 130);
     }
 }
 

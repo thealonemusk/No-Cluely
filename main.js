@@ -1,7 +1,7 @@
 const path = require("path");
 const fs = require("fs");
 const { fileURLToPath } = require("url");
-const { app, BrowserWindow, globalShortcut, session, ipcMain } = require("electron");
+const { app, BrowserWindow, globalShortcut, session, ipcMain, clipboard } = require("electron");
 
 // ── Resolve a stable .env location ──
 // In packaged builds process.cwd() is unstable and frequently read-only
@@ -128,6 +128,7 @@ class ApplicationController {
     this._utteranceDispatchInFlight = false;
     this._utteranceCoalesceMs = 250;
     this._workId = 0;
+    this._lastAnswer = "";
 
     // First-run onboarding: detects missing .env / API key and triggers
     // a settings-window prompt on first launch so users don't have to
@@ -173,6 +174,7 @@ class ApplicationController {
   }
 
   persistAssistantTurn(llmResult, extra = {}) {
+    this._lastAnswer = llmResult.response;
     sessionManager.addModelResponse(llmResult.response, {
       skill: this.activeSkill,
       processingTime: llmResult.metadata.processingTime,
@@ -442,6 +444,7 @@ class ApplicationController {
       "Control+Shift+I": () => windowManager.toggleInteraction(),
       "Control+Shift+C": () => windowManager.switchToWindow("chat"),
       "Control+Shift+\\": () => this.clearSessionMemory(),
+      "Control+Shift+L": () => this.copyLastAnswer(),
       "Control+,": () => windowManager.showSettings(),
       "Alt+A": () => windowManager.toggleInteraction(),
       "Alt+R": () => this.toggleSpeechRecognition(),
@@ -493,8 +496,9 @@ class ApplicationController {
     speechService.on("error", (error) => {
       // In error, still compute availability
       this.speechAvailable = speechService.isAvailable ? speechService.isAvailable() : false;
+      const message = this.friendlyError(error && error.message ? error.message : error);
       BrowserWindow.getAllWindows().forEach((window) => {
-        window.webContents.send("speech-error", { error, available: this.speechAvailable });
+        window.webContents.send("speech-error", { error: message, available: this.speechAvailable });
       });
     });
   }
@@ -1099,7 +1103,6 @@ class ApplicationController {
       if (!capture.imageBuffer || !capture.imageBuffer.length) {
         windowManager.hideLLMResponse();
         this.broadcastOCRError("Failed to capture screenshot image");
-        this.broadcastAppStatus("error");
         return;
       }
 
@@ -1425,17 +1428,21 @@ class ApplicationController {
   }
 
   broadcastOCRError(errorMessage) {
+    const error = this.friendlyError(errorMessage);
     windowManager.broadcastToAllWindows("ocr-error", {
-      error: errorMessage,
+      error,
       timestamp: new Date().toISOString(),
     });
+    this.broadcastAppStatus(error);
   }
 
   broadcastLLMError(errorMessage) {
+    const error = this.friendlyError(errorMessage);
     windowManager.broadcastToAllWindows("llm-error", {
-      error: errorMessage,
+      error,
       timestamp: new Date().toISOString(),
     });
+    this.broadcastAppStatus(error);
   }
 
   broadcastTranscriptionLLMResponse(llmResult) {
@@ -1769,6 +1776,36 @@ class ApplicationController {
     this.broadcastAppStatus("cancelled");
     windowManager.hideLLMResponse();
     setTimeout(() => this.broadcastAppStatus(""), 1200);
+  }
+
+  copyLastAnswer() {
+    const text = this._lastAnswer;
+    if (!text) {
+      this.broadcastAppStatus("no answer yet");
+      setTimeout(() => this.broadcastAppStatus(""), 1200);
+      return;
+    }
+    try {
+      clipboard.writeText(String(text));
+      this.broadcastAppStatus("copied");
+      setTimeout(() => this.broadcastAppStatus(""), 1200);
+    } catch (error) {
+      logger.error("Failed to copy last answer", { error: error.message });
+    }
+  }
+
+  friendlyError(message) {
+    const text = String(message || "");
+    if (/api key|not initialized|not configured|placeholder/i.test(text)) {
+      return "API key missing or invalid. Open Settings (Ctrl+,).";
+    }
+    if (/whisper|speech recognition/i.test(text)) {
+      return "Speech is not ready. Check Whisper in Settings.";
+    }
+    if (/screenshot|capture|image buffer/i.test(text)) {
+      return "Screenshot failed. Try again.";
+    }
+    return text;
   }
 
   persistSkillAndLanguage() {
