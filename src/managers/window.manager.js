@@ -58,8 +58,8 @@ class WindowManager {
         alwaysOnTop: true
       },
       settings: {
-        width: 400,
-        height: 460,
+        width: 440,
+        height: 620,
         file: 'settings.html',
         title: 'Settings',
         frame: false,

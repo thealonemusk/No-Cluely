@@ -293,15 +293,83 @@
         
         <div class="settings-content">
             <div class="settings-section">
-                <div class="settings-section-title">
-                    <i class="fas fa-window-maximize"></i>
-                    Window Settings
+                <div class="settings-section-title">AI Provider</div>
+                <div class="settings-section-content settings-stack">
+                    <div class="settings-item">
+                        <div>
+                            <div class="settings-item-label">Provider</div>
+                            <div class="settings-item-description">Used for chat, screenshots, and voice</div>
+                        </div>
+                        <select class="input-field" id="llmProvider">
+                            <option value="gemini">Gemini</option>
+                            <option value="claude">Claude</option>
+                            <option value="cursor">Cursor</option>
+                        </select>
+                    </div>
+                    <div class="settings-item" data-provider-field="gemini">
+                        <div>
+                            <div class="settings-item-label">Gemini API key</div>
+                        </div>
+                        <input type="password" class="input-field" id="geminiKey" autocomplete="off">
+                    </div>
+                    <div class="settings-item" data-provider-field="claude">
+                        <div>
+                            <div class="settings-item-label">Anthropic API key</div>
+                        </div>
+                        <input type="password" class="input-field" id="claudeKey" autocomplete="off">
+                    </div>
+                    <div class="settings-item" data-provider-field="cursor">
+                        <div>
+                            <div class="settings-item-label">Cursor API key</div>
+                        </div>
+                        <input type="password" class="input-field" id="cursorKey" autocomplete="off">
+                    </div>
                 </div>
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-section-title">Speech</div>
+                <div class="settings-section-content settings-stack">
+                    <div class="settings-item">
+                        <div>
+                            <div class="settings-item-label">Provider</div>
+                        </div>
+                        <select class="input-field" id="speechProvider">
+                            <option value="whisper">Whisper (local)</option>
+                            <option value="azure">Azure Speech</option>
+                        </select>
+                    </div>
+                    <div class="settings-item">
+                        <div>
+                            <div class="settings-item-label">Capture mode</div>
+                            <div class="settings-item-description">Manual is start/stop. VAD stops on silence.</div>
+                        </div>
+                        <select class="input-field" id="whisperCaptureMode">
+                            <option value="manual">Manual</option>
+                            <option value="vad">Voice activity</option>
+                        </select>
+                    </div>
+                    <div class="settings-item">
+                        <div>
+                            <div class="settings-item-label">Answer target</div>
+                            <div class="settings-item-description">Full answers go to chat by default</div>
+                        </div>
+                        <select class="input-field" id="whisperResponseTarget">
+                            <option value="chat">Chat</option>
+                            <option value="overlay">Overlay</option>
+                            <option value="both">Both</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-section-title">Window</div>
                 <div class="settings-section-content">
                     <div class="settings-item">
                         <div>
                             <div class="settings-item-label">Window Gap</div>
-                            <div class="settings-item-description">Gap between bound windows (in pixels)</div>
+                            <div class="settings-item-description">Gap between bound windows (pixels)</div>
                         </div>
                         <input type="number" class="input-field" id="windowGap" placeholder="20" min="0" max="100">
                     </div>
