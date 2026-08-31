@@ -115,9 +115,8 @@ class ApplicationController {
   constructor() {
     this.isReady = false;
     this.starting = false;
-    this.activeSkill = "dsa";
-  // Default to C++ so language is enforced from first run
-  this.codingLanguage = "cpp";
+    this.activeSkill = promptLoader.normalizeSkillName(process.env.ACTIVE_SKILL || "dsa");
+    this.codingLanguage = String(process.env.CODING_LANGUAGE || "cpp").trim().toLowerCase() || "cpp";
     this.speechAvailable = false;
 
     // Utterance coalescing: VAD emits a transcript per natural pause, but a
@@ -864,6 +863,7 @@ class ApplicationController {
 
     ipcMain.handle("update-active-skill", (event, skill) => {
       this.activeSkill = promptLoader.normalizeSkillName(skill);
+      this.persistSkillAndLanguage();
       windowManager.broadcastToAllWindows("skill-changed", { skill: this.activeSkill });
       return { success: true };
     });
@@ -934,6 +934,7 @@ class ApplicationController {
     // Handle update skill
     ipcMain.on("update-skill", (event, skill) => {
       this.activeSkill = promptLoader.normalizeSkillName(skill);
+      this.persistSkillAndLanguage();
       windowManager.broadcastToAllWindows("skill-updated", { skill: this.activeSkill });
     });
 
@@ -1059,6 +1060,7 @@ class ApplicationController {
 
     const newSkill = availableSkills[newIndex];
     this.activeSkill = newSkill;
+    this.persistSkillAndLanguage();
 
     // Update session manager with the new skill
     sessionManager.setActiveSkill(newSkill);
@@ -1539,9 +1541,9 @@ class ApplicationController {
     try {
       // ── In-memory updates + window broadcasts ──
       if (settings.codingLanguage) {
-        this.codingLanguage = settings.codingLanguage;
+        this.codingLanguage = String(settings.codingLanguage).trim().toLowerCase();
         windowManager.broadcastToAllWindows("coding-language-changed", {
-          language: settings.codingLanguage,
+          language: this.codingLanguage,
         });
       }
       if (settings.activeSkill) {
@@ -1608,6 +1610,10 @@ class ApplicationController {
       }
       if (settings.cursorKey !== undefined) {
         envUpdates.CURSOR_API_KEY = settings.cursorKey;
+      }
+      if (settings.codingLanguage || settings.activeSkill) {
+        envUpdates.ACTIVE_SKILL = this.activeSkill;
+        envUpdates.CODING_LANGUAGE = this.codingLanguage;
       }
 
       // Capture the previous whisper command BEFORE persisting — persistEnvUpdates
@@ -1689,6 +1695,13 @@ class ApplicationController {
    * @param {Object<string, string>} updates - keys to upsert
    * @returns {string[]} keys that were actually persisted
    */
+  persistSkillAndLanguage() {
+    this.persistEnvUpdates({
+      ACTIVE_SKILL: this.activeSkill,
+      CODING_LANGUAGE: this.codingLanguage
+    });
+  }
+
   persistEnvUpdates(updates) {
     if (!updates || typeof updates !== "object") return [];
     const keys = Object.keys(updates);
