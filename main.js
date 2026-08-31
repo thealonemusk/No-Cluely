@@ -1084,6 +1084,7 @@ class ApplicationController {
     const startTime = Date.now();
 
     try {
+      this.openChatForAnswer();
       windowManager.showLLMLoading();
 
   const capture = await captureService.captureAndProcess();
@@ -1106,7 +1107,7 @@ class ApplicationController {
       const sessionHistory = this.getSessionTurns();
       const programmingLanguage = this.getSkillProgrammingLanguage();
       const messageId = this.nextMessageId("img");
-      windowManager.broadcastToAllWindows("transcription-llm-response-start", {
+      this.sendToVoiceResponseWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
       });
@@ -1118,7 +1119,7 @@ class ApplicationController {
         sessionHistory,
         programmingLanguage,
         (delta) => {
-          windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
+          this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
@@ -1127,8 +1128,8 @@ class ApplicationController {
       llmResult.metadata = { ...llmResult.metadata, messageId };
 
       this.persistAssistantTurn(llmResult, { isImageAnalysis: true });
-      this.broadcastTranscriptionLLMResponse(llmResult);
-      this.showOverlayAnswer(llmResult, { isImageAnalysis: true });
+      this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
+      this.finishOverlayStatus(llmResult, { isImageAnalysis: true });
     } catch (error) {
       logger.error("Screenshot OCR process failed", {
         error: error.message,
@@ -1153,7 +1154,8 @@ class ApplicationController {
     try {
       const programmingLanguage = this.getSkillProgrammingLanguage();
       const messageId = this.nextMessageId("chat");
-      windowManager.broadcastToAllWindows("transcription-llm-response-start", {
+      this.openChatForAnswer();
+      this.sendToVoiceResponseWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
       });
@@ -1165,7 +1167,7 @@ class ApplicationController {
         sessionHistory,
         programmingLanguage,
         (delta) => {
-          windowManager.broadcastToAllWindows("transcription-llm-response-chunk", {
+          this.sendToVoiceResponseWindows("transcription-llm-response-chunk", {
             messageId,
             delta
           });
@@ -1182,8 +1184,8 @@ class ApplicationController {
       });
 
       this.persistAssistantTurn(llmResult);
-      this.broadcastTranscriptionLLMResponse(llmResult);
-      this.showOverlayAnswer(llmResult);
+      this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
+      this.finishOverlayStatus(llmResult);
     } catch (error) {
       logger.error("LLM processing failed", {
         error: error.message,
@@ -1316,6 +1318,7 @@ class ApplicationController {
 
       const programmingLanguage = this.getSkillProgrammingLanguage();
       messageId = this.nextMessageId("tr");
+      this.openChatForAnswer();
       this.sendToVoiceResponseWindows("transcription-llm-response-start", {
         messageId,
         skill: this.activeSkill
@@ -1339,9 +1342,7 @@ class ApplicationController {
 
       this.persistAssistantTurn(llmResult, { isTranscriptionResponse: true });
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
-      if (this.shouldShowVoiceOverlay()) {
-        this.showOverlayAnswer(llmResult, { isTranscriptionResponse: true });
-      }
+      this.finishOverlayStatus(llmResult, { isTranscriptionResponse: true });
 
       logger.info("Transcription LLM response completed", {
         responseLength: llmResult.response.length,
@@ -1373,9 +1374,7 @@ class ApplicationController {
         });
 
         this.sendTranscriptionLLMResponseToVoiceTargets(fallbackResult);
-        if (this.shouldShowVoiceOverlay()) {
-          this.showOverlayAnswer(fallbackResult, { isTranscriptionResponse: true });
-        }
+        this.finishOverlayStatus(fallbackResult, { isTranscriptionResponse: true });
         logger.info("Used fallback response for transcription", {
           skill: this.activeSkill,
           fallbackResponse: fallbackResult.response
@@ -1435,8 +1434,20 @@ class ApplicationController {
   }
 
   getVoiceResponseTarget() {
-    const configured = String(process.env.WHISPER_RESPONSE_TARGET || 'both').trim().toLowerCase();
-    return ['chat', 'overlay', 'both'].includes(configured) ? configured : 'both';
+    const configured = String(process.env.WHISPER_RESPONSE_TARGET || 'chat').trim().toLowerCase();
+    return ['chat', 'overlay', 'both'].includes(configured) ? configured : 'chat';
+  }
+
+  openChatForAnswer() {
+    windowManager.showChatWindow();
+  }
+
+  finishOverlayStatus(llmResult, extra = {}) {
+    if (this.getVoiceResponseTarget() === 'overlay' && llmResult) {
+      this.showOverlayAnswer(llmResult, extra);
+      return;
+    }
+    windowManager.hideLLMResponse();
   }
 
   shouldShowVoiceOverlay() {
@@ -1533,7 +1544,7 @@ class ApplicationController {
       whisperDevice: process.env.WHISPER_DEVICE || "auto",
       whisperCaptureMode: process.env.WHISPER_CAPTURE_MODE ||
         (process.env.WHISPER_MANUAL_CAPTURE === "true" ? "manual" : "vad"),
-      whisperResponseTarget: process.env.WHISPER_RESPONSE_TARGET || "both",
+      whisperResponseTarget: process.env.WHISPER_RESPONSE_TARGET || "chat",
       whisperSegmentMs: process.env.WHISPER_SEGMENT_MS || "4000",
       llmProvider: ["gemini", "claude", "cursor"].includes(String(process.env.LLM_PROVIDER || "").trim().toLowerCase())
         ? String(process.env.LLM_PROVIDER).trim().toLowerCase()
