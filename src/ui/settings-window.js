@@ -20,7 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const applySettings = (settings) => {
         if (!settings) return;
         if (fields.windowGap) fields.windowGap.value = settings.windowGap ?? '';
-        if (fields.llmProvider) fields.llmProvider.value = settings.llmProvider || 'gemini';
+        if (fields.llmProvider) fields.llmProvider.value = settings.llmProvider || 'cursor';
         if (fields.geminiKey) fields.geminiKey.value = settings.geminiKey || '';
         if (fields.claudeKey) fields.claudeKey.value = settings.claudeKey || '';
         if (fields.cursorKey) fields.cursorKey.value = settings.cursorKey || '';
@@ -31,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const updateProviderFields = () => {
-        const provider = fields.llmProvider ? fields.llmProvider.value : 'gemini';
+        const provider = fields.llmProvider ? fields.llmProvider.value : 'cursor';
         document.querySelectorAll('[data-provider-field]').forEach((row) => {
             row.style.display = row.getAttribute('data-provider-field') === provider ? '' : 'none';
         });

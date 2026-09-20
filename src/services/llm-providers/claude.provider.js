@@ -1,4 +1,13 @@
 const https = require('https');
+const config = require('../../core/config');
+
+// Process-wide pool. Without it every message re-did the TLS handshake with
+// api.anthropic.com before any prompt bytes moved.
+const agent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 15000,
+  maxSockets: 8
+});
 
 function normalizeMessages(messages) {
   const out = [];
@@ -80,9 +89,12 @@ function requestClaude({ apiKey, model, system, messages, imageBuffer, mimeType,
   }
 
   const stream = typeof onDelta === 'function';
+  const configuredMaxTokens = Number(config.get('llm.claude.maxOutputTokens'));
   const body = {
     model,
-    max_tokens: 8192,
+    max_tokens: Number.isFinite(configuredMaxTokens) && configuredMaxTokens > 0
+      ? Math.round(configuredMaxTokens)
+      : 8192,
     messages: normalized,
     stream
   };
@@ -101,7 +113,8 @@ function requestClaude({ apiKey, model, system, messages, imageBuffer, mimeType,
       'anthropic-version': '2023-06-01',
       'Content-Length': Buffer.byteLength(postData)
     },
-    timeout: timeout || 30000
+    timeout: timeout || 30000,
+    agent
   };
 
   return new Promise((resolve, reject) => {
@@ -160,19 +173,29 @@ function requestClaude({ apiKey, model, system, messages, imageBuffer, mimeType,
           if (!payload || payload === '[DONE]') {
             continue;
           }
+          let json;
           try {
-            const json = JSON.parse(payload);
-            if (json.type === 'error') {
-              throw new Error(json.error?.message || 'Claude stream error');
-            }
-            const piece = extractDeltaText(json);
-            if (piece) {
-              fullText += piece;
+            json = JSON.parse(payload);
+          } catch (_) {
+            // Not a complete JSON event yet (or a keep-alive comment); the
+            // line framing above will deliver the rest. Never fatal.
+            continue;
+          }
+          if (json.type === 'error') {
+            // Stop pulling a response we are abandoning so the pooled socket
+            // is not left half-drained for the next request.
+            req.destroy();
+            finish(reject, new Error(json.error?.message || 'Claude stream error'));
+            return;
+          }
+          const piece = extractDeltaText(json);
+          if (piece) {
+            fullText += piece;
+            try {
               onDelta(piece);
-            }
-          } catch (error) {
-            if (error.message && !error.message.includes('Unexpected')) {
-              finish(reject, error);
+            } catch (deltaError) {
+              // A renderer that has gone away must not abort a response we
+              // are otherwise receiving fine.
             }
           }
         }

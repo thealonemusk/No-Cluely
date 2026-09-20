@@ -1,3 +1,4 @@
+const https = require('https');
 const { GoogleGenAI } = require('@google/genai');
 const logger = require('../core/logger').createServiceLogger('LLM');
 const config = require('../core/config');
@@ -5,11 +6,26 @@ const { promptLoader } = require('../../prompt-loader');
 
 const CONVERSATION_TURN_LIMIT = 16;
 
+// A DSA answer is thousands of characters, so 16 unbounded turns can push tens
+// of thousands of characters of prefill into every follow-up request. Keeping
+// the newest turns under a character budget is the cheapest way to cut
+// time-to-first-token without losing the part of the conversation that matters.
+const CONVERSATION_CHAR_BUDGET = 24000;
+
+// One agent for the whole process. A per-request `new https.Agent({keepAlive})`
+// is pointless — the pool dies with the request — so every call paid for a
+// fresh TCP + TLS handshake to Google before a single byte of prompt moved.
+const geminiAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 15000,
+  maxSockets: 8
+});
+
 class LLMService {
   constructor() {
     this.client = null;
     this.model = null;
-    this.provider = 'gemini';
+    this.provider = 'cursor';
     this.isInitialized = false;
     this.requestCount = 0;
     this.errorCount = 0;
@@ -18,8 +34,7 @@ class LLMService {
   }
 
   getActiveProvider() {
-    const raw = String(process.env.LLM_PROVIDER || config.get('llm.provider') || 'gemini').trim().toLowerCase();
-    return ['gemini', 'claude', 'cursor'].includes(raw) ? raw : 'gemini';
+    return config.resolveLlmProvider();
   }
 
   shouldUseAlternateProvider() {
@@ -102,7 +117,7 @@ class LLMService {
       }));
 
     const collapsed = [];
-    for (const message of mapped) {
+    for (const message of this.limitTurnsToCharBudget(mapped)) {
       const last = collapsed[collapsed.length - 1];
       if (last && last.role === message.role) {
         last.content = `${last.content}\n${message.content}`;
@@ -226,6 +241,17 @@ class LLMService {
     this.client = null;
     this.model = null;
 
+    // resolveLlmProvider() silently falls back to whichever provider actually
+    // has a key. That is good for first run and very confusing afterwards:
+    // you pick Cursor in Settings, get Gemini's answers, and nothing says so.
+    const requested = String(process.env.LLM_PROVIDER || '').trim().toLowerCase();
+    if (requested && requested !== this.provider) {
+      logger.warn(`Requested LLM provider "${requested}" has no usable API key; using "${this.provider}" instead`, {
+        requested,
+        using: this.provider
+      });
+    }
+
     if (this.provider === 'claude') {
       const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim();
       if (!apiKey || apiKey === 'your_anthropic_api_key_here') {
@@ -275,6 +301,21 @@ class LLMService {
         error: error.message 
       });
     }
+  }
+
+  /**
+   * Wall-clock budget for one logical request. The model/retry sweep checks
+   * this between attempts so a bad network cannot stretch a single question
+   * across several minutes of silent retrying.
+   */
+  requestDeadline() {
+    const budget = Number(config.get('llm.gemini.totalDeadlineMs'));
+    const ms = Number.isFinite(budget) && budget > 0 ? budget : 75000;
+    return Date.now() + ms;
+  }
+
+  deadlineExceeded(deadline) {
+    return typeof deadline === 'number' && Date.now() >= deadline;
   }
 
   getGenerationConfig(overrides = {}) {
@@ -513,6 +554,42 @@ class LLMService {
     }
   }
 
+  /**
+   * Keep the most recent turns that fit the character budget, oldest first.
+   * Always keeps at least the newest turn so one long message still goes
+   * through instead of producing an empty request.
+   */
+  limitTurnsToCharBudget(turns, budget = CONVERSATION_CHAR_BUDGET) {
+    if (!Array.isArray(turns) || turns.length === 0) {
+      return [];
+    }
+    const kept = [];
+    let used = 0;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const turn = turns[i];
+      const size = this.measureTurnChars(turn);
+      if (kept.length > 0 && used + size > budget) {
+        break;
+      }
+      kept.unshift(turn);
+      used += size;
+    }
+    return kept;
+  }
+
+  measureTurnChars(turn) {
+    if (!turn) {
+      return 0;
+    }
+    if (typeof turn.content === 'string') {
+      return turn.content.length;
+    }
+    if (Array.isArray(turn.parts)) {
+      return turn.parts.reduce((sum, part) => sum + ((part && part.text) ? part.text.length : 0), 0);
+    }
+    return 0;
+  }
+
   collapseAdjacentGeminiTurns(contents) {
     const collapsed = [];
     for (const item of contents) {
@@ -543,7 +620,7 @@ class LLMService {
         role: event.role === 'model' || event.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: event.content.trim() }]
       }));
-    return this.collapseAdjacentGeminiTurns(contents);
+    return this.collapseAdjacentGeminiTurns(this.limitTurnsToCharBudget(contents));
   }
 
   mergeCurrentUserTurn(contents, rawText, displayText) {
@@ -584,7 +661,7 @@ class LLMService {
     }
     parts.push({
       inlineData: {
-        data: latest.buffer.toString('base64'),
+        data: latest.base64 || latest.buffer.toString('base64'),
         mimeType: latest.mimeType || 'image/png'
       }
     });
@@ -1124,8 +1201,13 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     });
 
     let lastError = null;
+    const deadline = this.requestDeadline();
 
     for (const modelName of modelsToTry) {
+      if (this.deadlineExceeded(deadline)) {
+        logger.warn('Gemini request budget exhausted; stopping model sweep', { model: modelName });
+        break;
+      }
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           const timeoutPromise = new Promise((_, reject) =>
@@ -1214,6 +1296,11 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           // Use exponential backoff with jitter for network errors
           const baseDelay = errorInfo.isNetworkError ? 2500 : 1500;
           const delay = baseDelay * attempt + Math.random() * 1000;
+
+          if (this.deadlineExceeded(deadline)) {
+            logger.warn('Gemini request budget exhausted; not retrying', { model: modelName });
+            break;
+          }
 
           logger.debug(`Waiting ${delay}ms before retry ${attempt + 1}`, {
             baseDelay,
@@ -1342,11 +1429,33 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     const modelsToTry = [primaryModel, ...fallbackModels];
 
     let lastError = null;
+    // Once a failed attempt has already pushed text to the UI, a retry would
+    // append a second copy of the answer to the same bubble. Deltas are a
+    // nicety; correctness of the final text is not. So we stream only until
+    // the first partial failure, then fall silent and let the caller render
+    // the complete response in one go.
+    let emittedAnyDelta = false;
+    let deltasDisabled = false;
+    const guardedDelta = typeof onDelta === 'function'
+      ? (piece) => {
+          if (deltasDisabled) {
+            return;
+          }
+          emittedAnyDelta = true;
+          onDelta(piece);
+        }
+      : null;
+
+    const deadline = this.requestDeadline();
 
     for (const modelName of modelsToTry) {
+      if (this.deadlineExceeded(deadline)) {
+        logger.warn('Gemini streaming budget exhausted; stopping model sweep', { model: modelName });
+        break;
+      }
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          const fullText = await this._streamRequestForModel(geminiRequest, modelName, apiKey, onDelta);
+          const fullText = await this._streamRequestForModel(geminiRequest, modelName, apiKey, guardedDelta);
 
           if (!fullText) {
             throw new Error('Empty streamed response from Gemini API');
@@ -1363,9 +1472,14 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           const errorInfo = this.analyzeError(error);
           lastError = error;
 
+          if (emittedAnyDelta) {
+            deltasDisabled = true;
+          }
+
           logger.warn(`Gemini streaming attempt ${attempt} failed for model ${modelName}`, {
             error: error.message,
             errorType: errorInfo.type,
+            partialTextAlreadyStreamed: emittedAnyDelta,
             remainingAttempts: maxRetries - attempt,
             model: modelName
           });
@@ -1375,6 +1489,11 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           }
 
           if (attempt === maxRetries) {
+            break;
+          }
+
+          if (this.deadlineExceeded(deadline)) {
+            logger.warn('Gemini streaming budget exhausted; not retrying', { model: modelName });
             break;
           }
 
@@ -1389,11 +1508,10 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
   }
 
   _streamRequestForModel(geminiRequest, modelName, apiKey, onDelta) {
-    const https = require('https');
     const timeout = config.get('llm.gemini.timeout');
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse`;
     const postData = JSON.stringify(geminiRequest);
-    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+    const agent = geminiAgent;
 
     const options = {
       method: 'POST',
@@ -1825,7 +1943,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
         : config.get('llm.gemini');
     return {
       isInitialized: this.isInitialized,
-      provider: this.provider || 'gemini',
+      provider: this.provider || 'cursor',
       requestCount: this.requestCount,
       errorCount: this.errorCount,
       successRate: this.requestCount > 0 ? ((this.requestCount - this.errorCount) / this.requestCount) * 100 : 0,
@@ -1838,7 +1956,6 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
   }
 
   async executeAlternativeRequest(geminiRequest) {
-    const https = require('https');
     const apiKey = config.getApiKey('GEMINI');
     const primaryModel = config.get('llm.gemini.model');
     const fallbackModels = config.get('llm.gemini.fallbackModels') || [];
@@ -1869,13 +1986,11 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
   }
 
   async _executeAlternativeRequestForModel(geminiRequest, modelName, apiKey) {
-    const https = require('https');
-
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
     const postData = JSON.stringify(geminiRequest);
 
-    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+    const agent = geminiAgent;
 
     const options = {
       method: 'POST',

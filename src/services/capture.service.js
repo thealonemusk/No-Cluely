@@ -1,5 +1,6 @@
 const { desktopCapturer, screen } = require('electron');
 const logger = require('../core/logger').createServiceLogger('CAPTURE');
+const config = require('../core/config');
 
 class CaptureService {
   constructor() {
@@ -32,11 +33,17 @@ class CaptureService {
     this.isProcessing = true;
     const startTime = Date.now();
     try {
-      const { image, metadata } = await this.captureScreenshot(options);
+      const wantsCrop = options.area && this._isValidArea(options.area);
+      // A crop rectangle is expressed in full-resolution display coordinates,
+      // so the capture itself must stay full-size; everything else is grabbed
+      // pre-scaled, which is both faster to composite and far smaller to send.
+      const { image, metadata } = await this.captureScreenshot({
+        ...options,
+        fullResolution: wantsCrop
+      });
 
-      // Crop if area specified
       let finalImage = image;
-      if (options.area && this._isValidArea(options.area)) {
+      if (wantsCrop) {
         try {
           finalImage = image.crop(options.area);
         } catch (e) {
@@ -44,15 +51,18 @@ class CaptureService {
         }
       }
 
-      const buffer = finalImage.toPNG();
+      finalImage = this._downscaleToBudget(finalImage);
+      const { buffer, mimeType } = this._encode(finalImage);
+
       logger.logPerformance('Screenshot capture', startTime, {
         bytes: buffer.length,
+        mimeType,
         dimensions: finalImage.getSize()
       });
 
       return {
         imageBuffer: buffer,
-        mimeType: 'image/png',
+        mimeType,
         metadata: {
           timestamp: new Date().toISOString(),
           source: metadata,
@@ -67,29 +77,31 @@ class CaptureService {
   async captureScreenshot(options = {}) {
     const targetDisplay = this._getTargetDisplay(options.displayId);
     const { width, height } = targetDisplay.size || { width: 1920, height: 1080 };
+    const requested = options.fullResolution
+      ? { width, height }
+      : this._fitToBudget(width, height);
 
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
-      thumbnailSize: { width, height }
+      thumbnailSize: requested
     });
 
     if (sources.length === 0) {
       throw new Error('No screen sources available for capture');
     }
 
-    // Find source matching the target display by comparing sizes as heuristic
-    let source = sources[0];
-    const match = sources.find(s => {
-      const size = s.thumbnail.getSize();
-      return size.width === width && size.height === height;
-    });
-    if (match) source = match;
+    // `display_id` is the authoritative link back to the Electron display.
+    // Thumbnail sizes can no longer be used as the heuristic because we now
+    // ask for a scaled-down thumbnail, so they never equal the display size.
+    const wantedId = String(targetDisplay.id);
+    const source = sources.find(s => String(s.display_id) === wantedId) || sources[0];
 
     const image = source.thumbnail;
-    if (!image) throw new Error('Failed to capture screen thumbnail');
+    if (!image || image.isEmpty()) throw new Error('Failed to capture screen thumbnail');
 
     logger.debug('Screenshot captured successfully', {
       sourceName: source.name,
+      requested,
       imageSize: image.getSize()
     });
 
@@ -102,6 +114,61 @@ class CaptureService {
         captureTime: new Date().toISOString()
       }
     };
+  }
+
+  /**
+   * Longest-edge budget for anything we upload to an LLM. Screens are captured
+   * and re-encoded at this size: a 4K frame drops from tens of megabytes of PNG
+   * to a few hundred kilobytes of JPEG, which is the difference between seconds
+   * and milliseconds of upload before the model can even start reading.
+   */
+  _maxEdge() {
+    const configured = Number(config.get('capture.maxEdge'));
+    return Number.isFinite(configured) && configured > 0 ? Math.round(configured) : 1600;
+  }
+
+  _fitToBudget(width, height) {
+    const maxEdge = this._maxEdge();
+    const longest = Math.max(width, height);
+    if (!Number.isFinite(longest) || longest <= 0 || longest <= maxEdge) {
+      return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+    }
+    const scale = maxEdge / longest;
+    return {
+      width: Math.max(1, Math.round(width * scale)),
+      height: Math.max(1, Math.round(height * scale))
+    };
+  }
+
+  _downscaleToBudget(image) {
+    try {
+      const size = image.getSize();
+      const target = this._fitToBudget(size.width, size.height);
+      if (target.width === size.width && target.height === size.height) {
+        return image;
+      }
+      return image.resize({ ...target, quality: 'good' });
+    } catch (e) {
+      logger.warn('Downscale failed, using original image', { error: e.message });
+      return image;
+    }
+  }
+
+  _encode(image) {
+    const quality = Number(config.get('capture.jpegQuality'));
+    const normalized = Number.isFinite(quality) ? Math.min(100, Math.max(1, Math.round(quality))) : 80;
+    if (config.get('capture.format') === 'png') {
+      return { buffer: image.toPNG(), mimeType: 'image/png' };
+    }
+    try {
+      const buffer = image.toJPEG(normalized);
+      if (buffer && buffer.length) {
+        return { buffer, mimeType: 'image/jpeg' };
+      }
+    } catch (e) {
+      logger.warn('JPEG encode failed, falling back to PNG', { error: e.message });
+    }
+    return { buffer: image.toPNG(), mimeType: 'image/png' };
   }
 
   _getTargetDisplay(displayId) {

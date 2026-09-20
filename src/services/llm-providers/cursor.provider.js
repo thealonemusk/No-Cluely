@@ -4,6 +4,13 @@ const path = require('path');
 
 const EMPTY_CWD = path.join(os.tmpdir(), 'No-Cluely-cursor-empty');
 
+// No-Cluely uses Cursor purely as a question-answering model: it never wants
+// the agent to read files, run shell commands or search the web. Leaving the
+// default toolset on means the agent may spend several seconds looping through
+// tool calls in an empty scratch directory before it writes a single word of
+// the answer. An empty list is the SDK's documented way to say "text only".
+const NO_TOOLS = [];
+
 function ensureEmptyCwd() {
   fs.mkdirSync(EMPTY_CWD, { recursive: true });
   return EMPTY_CWD;
@@ -73,6 +80,57 @@ async function disposeAgent(agent) {
   } catch (_) { /* best effort */ }
 }
 
+/**
+ * Screenshots travel on the message, not on SendOptions. `SDKUserMessage` is
+ * `{ text, images? }`; SendOptions has no image field at all, so anything put
+ * there is silently dropped and the model answers having never seen the image.
+ */
+function buildUserMessage(prompt, imageBuffer, mimeType) {
+  const message = { text: prompt };
+  if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length) {
+    message.images = [{
+      data: imageBuffer.toString('base64'),
+      mimeType: mimeType || 'image/png'
+    }];
+  }
+  return message;
+}
+
+/**
+ * Race a promise against a wall clock. llm.service passes `llm.cursor.timeout`
+ * for exactly this, but nothing here ever read it, so a wedged SDK call left
+ * the app showing "thinking" forever with no way out but a restart.
+ */
+function withTimeout(promise, ms, label, onTimeout) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return promise;
+  }
+  let timer = null;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      if (typeof onTimeout === 'function') {
+        try { onTimeout(); } catch (_) { /* best effort */ }
+      }
+      reject(new Error(`Cursor ${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function describeRunFailure(result) {
+  const detail = result && result.error && result.error.message;
+  const code = result && result.error && result.error.code;
+  if (detail) {
+    return code ? `Cursor run failed (${code}): ${detail}` : `Cursor run failed: ${detail}`;
+  }
+  if (result && result.status === 'cancelled') {
+    return 'Cursor run was cancelled';
+  }
+  return 'Cursor agent run failed';
+}
+
 async function complete(options) {
   const apiKey = (options.apiKey || '').trim();
   if (!apiKey) {
@@ -87,46 +145,73 @@ async function complete(options) {
   const Agent = await loadAgent();
   const cwd = ensureEmptyCwd();
   const modelId = options.model || 'grok-4.6';
+  const timeout = Number(options.timeout);
+  const deadline = Number.isFinite(timeout) && timeout > 0 ? Date.now() + timeout : null;
+  const remaining = () => (deadline === null ? 0 : Math.max(1, deadline - Date.now()));
   let agent = null;
 
   try {
-    agent = await Agent.create({
+    agent = await withTimeout(Agent.create({
       apiKey,
       model: { id: modelId },
-      local: { cwd }
-    });
+      tools: NO_TOOLS,
+      local: {
+        cwd,
+        // Do not load project/user/team rule files from disk. They are
+        // irrelevant here and only add startup work and stray instructions.
+        settingSources: []
+      }
+    }), remaining(), 'agent startup');
 
+    const wantsDeltas = typeof options.onDelta === 'function';
+    let streamedText = '';
     const sendOptions = {};
-    if (options.imageBuffer && Buffer.isBuffer(options.imageBuffer)) {
-      sendOptions.images = [{
-        data: options.imageBuffer.toString('base64'),
-        mimeType: options.mimeType || 'image/png'
-      }];
-    }
 
-    const run = await agent.send(prompt, sendOptions);
-    let fullText = '';
-
-    if (run && typeof run.stream === 'function') {
-      for await (const event of run.stream()) {
-        const piece = extractAssistantText(event);
-        if (piece) {
-          fullText += piece;
-          if (typeof options.onDelta === 'function') {
-            options.onDelta(piece);
-          }
+    if (wantsDeltas) {
+      // `text-delta` is the SDK's token-level channel. The assistant messages
+      // on run.stream() arrive per block, which is far too coarse to feel live.
+      sendOptions.onDelta = ({ update }) => {
+        if (!update || update.type !== 'text-delta' || !update.text) {
+          return;
         }
-      }
+        streamedText += update.text;
+        try {
+          options.onDelta(update.text);
+        } catch (_) {
+          // A renderer that went away must not abort the run.
+        }
+      };
     }
 
-    if (run && typeof run.wait === 'function') {
-      const result = await run.wait();
-      if (result && result.status === 'error') {
-        throw new Error('Cursor agent run failed');
+    const run = await withTimeout(
+      agent.send(buildUserMessage(prompt, options.imageBuffer, options.mimeType), sendOptions),
+      remaining(),
+      'send'
+    );
+
+    let fullText = '';
+    const cancelRun = () => {
+      if (run && typeof run.cancel === 'function') {
+        Promise.resolve(run.cancel()).catch(() => {});
       }
-      if (!fullText.trim() && result && typeof result.result === 'string') {
+    };
+
+    if (run && typeof run.wait === 'function' && (typeof run.supports !== 'function' || run.supports('wait'))) {
+      const result = await withTimeout(run.wait(), remaining(), 'response', cancelRun);
+      if (result && (result.status === 'error' || result.status === 'cancelled')) {
+        throw new Error(describeRunFailure(result));
+      }
+      if (result && typeof result.result === 'string') {
         fullText = result.result;
       }
+    } else if (run && typeof run.stream === 'function') {
+      for await (const event of run.stream()) {
+        fullText += extractAssistantText(event);
+      }
+    }
+
+    if (!fullText.trim()) {
+      fullText = streamedText;
     }
 
     if (!fullText.trim()) {
@@ -134,7 +219,10 @@ async function complete(options) {
     }
     return fullText.trim();
   } finally {
-    await disposeAgent(agent);
+    // Tearing the agent down is cleanup, not part of producing the answer.
+    // Awaiting it here held the finished response back from the UI for as
+    // long as the SDK took to shut the session down.
+    disposeAgent(agent);
   }
 }
 

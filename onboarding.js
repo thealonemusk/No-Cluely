@@ -66,7 +66,7 @@
 
   const state = {
     step: 0,
-    llmProvider: 'gemini',
+    llmProvider: 'cursor',
     geminiKey: '',
     geminiConfigured: false, // a key already exists in .env from a prior run
     claudeConfigured: false,

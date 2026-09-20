@@ -1155,6 +1155,86 @@
           saveHistory();
         }
       }
+      // ── Streaming answers ───────────────────────────────────────────────
+      // The main process emits a start event, then a delta per model chunk,
+      // then the complete response. Rendering the deltas is what turns
+      // "wait for the whole answer" into "watch it appear"; without these
+      // handlers the stream was produced and thrown away.
+      const streamBuffers = new Map();
+      let streamFrame = null;
+
+      // Only glue to the bottom when the reader is already there, otherwise
+      // scrolling back through a long answer fights the incoming tokens.
+      function isScrolledToBottom() {
+        if (!chatMessages) return false;
+        return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 40;
+      }
+
+      function scheduleStreamPaint() {
+        if (streamFrame !== null) return;
+        streamFrame = requestAnimationFrame(() => {
+          streamFrame = null;
+          let stick = false;
+          streamBuffers.forEach((entry) => {
+            if (!entry.dirty) return;
+            entry.dirty = false;
+            stick = stick || entry.stick;
+            if (entry.textEl) entry.textEl.textContent = entry.text;
+          });
+          if (stick) chatMessages.scrollTop = chatMessages.scrollHeight;
+        });
+      }
+
+      function beginStreamingResponse(messageId) {
+        if (!chatMessages || !messageId) return;
+        try { hideThinkingIndicator(); } catch (_) {}
+        if (streamBuffers.has(messageId)) return;
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant streaming';
+        messageDiv.setAttribute('data-stream-id', messageId);
+
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'message-time';
+        timeDiv.textContent = new Date().toLocaleTimeString();
+
+        const textDiv = document.createElement('div');
+        textDiv.className = 'message-text';
+        textDiv.textContent = '';
+
+        messageDiv.appendChild(timeDiv);
+        messageDiv.appendChild(textDiv);
+        chatMessages.appendChild(messageDiv);
+        streamBuffers.set(messageId, { el: messageDiv, textEl: textDiv, text: '', dirty: false, stick: true });
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+
+      function appendStreamingChunk(messageId, delta) {
+        if (!delta || !messageId) return;
+        if (!streamBuffers.has(messageId)) beginStreamingResponse(messageId);
+        const entry = streamBuffers.get(messageId);
+        if (!entry) return;
+        entry.text += delta;
+        entry.dirty = true;
+        entry.stick = isScrolledToBottom();
+        scheduleStreamPaint();
+      }
+
+      function removeStreamingBubble(messageId) {
+        const entry = messageId && streamBuffers.get(messageId);
+        if (!entry) return null;
+        streamBuffers.delete(messageId);
+        const text = entry.text;
+        if (entry.el && entry.el.parentNode) entry.el.remove();
+        return text;
+      }
+
+      // Replace the plain-text live bubble with the fully formatted answer.
+      function finalizeStreamingResponse(messageId, response) {
+        const streamed = removeStreamingBubble(messageId);
+        renderAssistantResponse(response || streamed || '');
+      }
+
       function renderAssistantResponse(response) {
         if (!response || typeof response !== 'string') return;
         // Deduplication: avoid processing the same response twice
@@ -1239,6 +1319,10 @@
 
         if (whysperAPI.onLlmError) {
           whysperAPI.onLlmError((event, data) => {
+            // Drop any half-streamed bubbles so the error is not appended
+            // next to an orphaned bubble that would never finish.
+            streamBuffers.forEach((_entry, id) => removeStreamingBubble(id));
+            try { hideThinkingIndicator(); } catch (_) {}
             if (data && data.error) addMessage(data.error, 'error');
           });
         }
@@ -1247,9 +1331,21 @@
         whysperAPI.onTranscriptionLlmResponse((event, data) => {
           if (data && data.response) {
             try { hideThinkingIndicator(); } catch (_) {}
-            renderAssistantResponse(data.response);
+            finalizeStreamingResponse(data.messageId, data.response);
           }
         });
+
+        if (whysperAPI.onTranscriptionLlmResponseStart) {
+          whysperAPI.onTranscriptionLlmResponseStart((event, data) => {
+            if (data && data.messageId) beginStreamingResponse(data.messageId);
+          });
+        }
+
+        if (whysperAPI.onTranscriptionLlmResponseChunk) {
+          whysperAPI.onTranscriptionLlmResponseChunk((event, data) => {
+            if (data && data.messageId) appendStreamingChunk(data.messageId, data.delta || '');
+          });
+        }
       }
 
       // UI Event Listeners
@@ -1354,9 +1450,6 @@
       });
 
       // Initialize
-      if (!chatHistory || chatHistory.length === 0) {
-        addMessage('Recording in Progress. press Alt+R to stop recording.', 'system');
-      }
     </script>
   </body>
 </html>

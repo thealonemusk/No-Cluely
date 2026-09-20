@@ -131,9 +131,12 @@ class SessionManager {
       this.latestScreenshot = null;
       return;
     }
+    // The screenshot is re-attached to follow-up turns and mirrored into the
+    // chat preview, so encode it once here rather than on every read.
     this.latestScreenshot = {
       buffer: imageBuffer,
-      mimeType: mimeType || 'image/png'
+      mimeType: mimeType || 'image/png',
+      base64: imageBuffer.toString('base64')
     };
   }
 

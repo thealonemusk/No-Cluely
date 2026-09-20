@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const config = require('./config');
 
 /**
  * First-run detection and onboarding helper.
@@ -29,7 +30,7 @@ class FirstRunManager {
   }
 
   _hasSelectedProviderKey(env) {
-    const provider = String(env.LLM_PROVIDER || 'gemini').trim().toLowerCase();
+    const provider = config.resolveLlmProvider(env);
     if (provider === 'claude') {
       return this._isUsableKey(env.ANTHROPIC_API_KEY, 'your_anthropic_api_key_here');
     }
@@ -93,8 +94,7 @@ class FirstRunManager {
    */
   getStatus() {
     const env = this._readEnv();
-    const provider = String(env.LLM_PROVIDER || 'gemini').trim().toLowerCase();
-    const llmProvider = ['gemini', 'claude', 'cursor'].includes(provider) ? provider : 'gemini';
+    const llmProvider = config.resolveLlmProvider(env);
     return {
       envExists: fs.existsSync(this.envPath),
       sentinelExists: fs.existsSync(this.sentinelPath),
@@ -158,12 +158,12 @@ class FirstRunManager {
     return [
       '# No-Cluely configuration',
       '# Add your API key below — the app picks it up immediately.',
-      '# Get a Gemini key from: https://aistudio.google.com/',
+      '# Get a Cursor key from: https://cursor.com/dashboard',
       '',
-      'LLM_PROVIDER=gemini',
-      'GEMINI_API_KEY=your_gemini_api_key_here',
-      'ANTHROPIC_API_KEY=',
+      'LLM_PROVIDER=cursor',
       'CURSOR_API_KEY=',
+      'GEMINI_API_KEY=',
+      'ANTHROPIC_API_KEY=',
       '',
       '# Speech provider: "whisper" (local faster-whisper) or "azure" (cloud).',
       '# WHISPER_COMMAND is auto-set to the project-local venv Python when you',

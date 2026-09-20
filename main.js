@@ -1092,9 +1092,11 @@ class ApplicationController {
 
     try {
       this.openChatForAnswer();
-      windowManager.showLLMLoading();
+      if (this.shouldShowVoiceOverlay()) {
+        windowManager.showLLMLoading();
+      }
 
-  const capture = await captureService.captureAndProcess();
+      const capture = await captureService.captureAndProcess();
 
       if (!this.isWorkCurrent(workId)) {
         return;
@@ -1107,12 +1109,14 @@ class ApplicationController {
       }
 
       sessionManager.setLatestScreenshot(capture.imageBuffer, capture.mimeType || 'image/png');
+      const capturedBase64 = (sessionManager.getLatestScreenshot() || {}).base64
+        || capture.imageBuffer.toString("base64");
       sessionManager.addUserInput(
         'I captured a screenshot of the current problem. Continue our conversation and use this image together with everything we already discussed.',
         'screenshot'
       );
       this.sendToChatWindow("screenshot-preview", {
-        dataUrl: `data:${capture.mimeType || "image/png"};base64,${capture.imageBuffer.toString("base64")}`
+        dataUrl: `data:${capture.mimeType || "image/png"};base64,${capturedBase64}`
       });
       this.sendToVoiceResponseWindows("transcription-received", {
         text: '[Screenshot] Analyze this with our current conversation.'
@@ -1179,7 +1183,9 @@ class ApplicationController {
         messageId,
         skill: this.activeSkill
       });
-      windowManager.showLLMLoading();
+      if (this.shouldShowVoiceOverlay()) {
+        windowManager.showLLMLoading();
+      }
 
       const llmResult = await llmService.processTextWithSkillStream(
         text,
@@ -1316,6 +1322,10 @@ class ApplicationController {
     // bubble the streaming start event created; otherwise a total failure
     // leaves an empty streamed bubble stranded next to the fallback message.
     let messageId = null;
+    // Hoisted alongside messageId: the catch below needs it to clear the
+    // status bar, otherwise a failed request leaves the bar reading
+    // "thinking" for the rest of the session.
+    let workId = null;
     try {
       // Validate input text
       if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -1340,7 +1350,7 @@ class ApplicationController {
         textPreview: cleanText.substring(0, 100) + "..."
       });
 
-      const workId = this.beginWork("thinking");
+      workId = this.beginWork("thinking");
       const programmingLanguage = this.getSkillProgrammingLanguage();
       messageId = this.nextMessageId("tr");
       this.openChatForAnswer();
@@ -1404,6 +1414,9 @@ class ApplicationController {
 
         this.sendTranscriptionLLMResponseToVoiceTargets(fallbackResult);
         this.finishOverlayStatus(fallbackResult, { isTranscriptionResponse: true });
+        if (workId !== null) {
+          this.endWork(workId);
+        }
         logger.info("Used fallback response for transcription", {
           skill: this.activeSkill,
           fallbackResponse: fallbackResult.response
@@ -1414,6 +1427,9 @@ class ApplicationController {
           fallbackError: fallbackError.message
         });
 
+        if (workId !== null) {
+          this.endWork(workId);
+        }
         sessionManager.addConversationEvent({
           role: 'system',
           content: `Transcription LLM processing failed: ${error.message}`,
@@ -1579,9 +1595,7 @@ class ApplicationController {
         (process.env.WHISPER_MANUAL_CAPTURE === "true" ? "manual" : "vad"),
       whisperResponseTarget: process.env.WHISPER_RESPONSE_TARGET || "chat",
       whisperSegmentMs: process.env.WHISPER_SEGMENT_MS || "4000",
-      llmProvider: ["gemini", "claude", "cursor"].includes(String(process.env.LLM_PROVIDER || "").trim().toLowerCase())
-        ? String(process.env.LLM_PROVIDER).trim().toLowerCase()
-        : "gemini",
+      llmProvider: config.resolveLlmProvider(),
       geminiKey: process.env.GEMINI_API_KEY || "",
       claudeKey: process.env.ANTHROPIC_API_KEY || "",
       cursorKey: process.env.CURSOR_API_KEY || "",
@@ -1589,6 +1603,22 @@ class ApplicationController {
       azureConfigured: !!process.env.AZURE_SPEECH_KEY && !!process.env.AZURE_SPEECH_REGION,
       speechAvailable: this.speechAvailable
     };
+  }
+
+  /**
+   * Strip credential values before anything reaches the log file. Settings
+   * carry Gemini / Claude / Cursor / Azure keys, and logs are plain text on
+   * disk that users routinely paste into bug reports.
+   */
+  redactSecrets(settings) {
+    const SECRET_KEYS = ["geminiKey", "claudeKey", "cursorKey", "azureKey"];
+    const safe = { ...settings };
+    for (const key of SECRET_KEYS) {
+      if (safe[key] !== undefined) {
+        safe[key] = safe[key] ? "<set>" : "";
+      }
+    }
+    return safe;
   }
 
   saveSettings(settings) {
@@ -1675,7 +1705,7 @@ class ApplicationController {
       // equal and skip the speech re-init below (the exact stale-mic-after-install
       // bug the re-init guards against).
       const prevWhisperCommand = process.env.WHISPER_COMMAND || '';
-      const prevLlmProvider = process.env.LLM_PROVIDER || 'gemini';
+      const prevLlmProvider = config.resolveLlmProvider();
 
       const persistedKeys = this.persistEnvUpdates(envUpdates);
 
@@ -1730,7 +1760,7 @@ class ApplicationController {
       }
 
       logger.info("Settings saved successfully", {
-        ...settings,
+        ...this.redactSecrets(settings),
         persistedEnvKeys: persistedKeys
       });
       return { success: true, persistedEnvKeys: persistedKeys };

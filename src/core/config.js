@@ -38,8 +38,18 @@ class ConfigManager {
         cleanupDelay: 5000
       },
 
+      capture: {
+        // Screenshots are only ever read by an LLM, so they are captured and
+        // re-encoded small. Uploading a full-resolution PNG of a 4K screen adds
+        // seconds before the model sees anything; a JPEG capped on the longest
+        // edge is a fraction of the bytes and reads identically.
+        maxEdge: 1600,
+        format: 'jpeg',
+        jpegQuality: 80
+      },
+
       llm: {
-        provider: 'gemini',
+        provider: 'cursor',
         claude: {
           model: 'claude-opus-5',
           timeout: 30000,
@@ -47,13 +57,18 @@ class ConfigManager {
         },
         cursor: {
           model: 'grok-4.6',
-          timeout: 60000
+          timeout: 120000
         },
         gemini: {
           model: 'gemini-3.1-flash-lite',
           fallbackModels: ['gemini-2.5-flash-lite', 'gemini-3.5-flash'],
           maxRetries: 3,
           timeout: 30000,
+          // Ceiling for one logical request across every model and retry.
+          // Without it, 3 models x 3 retries x a 30s timeout plus backoff can
+          // leave the user staring at "thinking" for minutes before the error
+          // finally surfaces.
+          totalDeadlineMs: 75000,
           fallbackEnabled: true,
           enableFallbackMethod: true,
           generation: {
@@ -129,6 +144,30 @@ class ConfigManager {
   getApiKey(service) {
     const envKey = `${service.toUpperCase()}_API_KEY`;
     return process.env[envKey];
+  }
+
+  isUsableApiKey(value, placeholder) {
+    const key = String(value || '').trim();
+    if (!key) return false;
+    if (placeholder && key === placeholder) return false;
+    if (key === 'your-api-key-here' || key === 'your_api_key_here') return false;
+    return true;
+  }
+
+  resolveLlmProvider(env = process.env) {
+    const raw = String(env.LLM_PROVIDER || this.config.llm.provider || '').trim().toLowerCase();
+    const hasCursor = this.isUsableApiKey(env.CURSOR_API_KEY, 'your_cursor_api_key_here');
+    const hasGemini = this.isUsableApiKey(env.GEMINI_API_KEY, 'your_gemini_api_key_here');
+    const hasClaude = this.isUsableApiKey(env.ANTHROPIC_API_KEY, 'your_anthropic_api_key_here');
+
+    if (raw === 'cursor' && hasCursor) return 'cursor';
+    if (raw === 'gemini' && hasGemini) return 'gemini';
+    if (raw === 'claude' && hasClaude) return 'claude';
+    if (hasCursor) return 'cursor';
+    if (hasGemini) return 'gemini';
+    if (hasClaude) return 'claude';
+    if (['gemini', 'claude', 'cursor'].includes(raw)) return raw;
+    return 'cursor';
   }
 }
 
