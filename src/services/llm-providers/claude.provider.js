@@ -28,8 +28,25 @@ function normalizeMessages(messages) {
   return out;
 }
 
-function attachImage(messages, imageBuffer, mimeType) {
-  if (!imageBuffer || !Buffer.isBuffer(imageBuffer) || !messages.length) {
+function imageBlocks(imageBuffer, mimeType, images) {
+  const shots = Array.isArray(images) && images.length
+    ? images
+    : (imageBuffer && Buffer.isBuffer(imageBuffer) ? [{ buffer: imageBuffer, mimeType }] : []);
+  return shots
+    .filter((shot) => shot && shot.buffer && Buffer.isBuffer(shot.buffer) && shot.buffer.length)
+    .map((shot) => ({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: shot.mimeType || mimeType || 'image/png',
+        data: shot.base64 || shot.buffer.toString('base64')
+      }
+    }));
+}
+
+function attachImage(messages, imageBuffer, mimeType, images) {
+  const blocks = imageBlocks(imageBuffer, mimeType, images);
+  if (!blocks.length || !messages.length) {
     return messages;
   }
   const last = messages[messages.length - 1];
@@ -38,14 +55,7 @@ function attachImage(messages, imageBuffer, mimeType) {
   }
   last.content = [
     { type: 'text', text: last.content },
-    {
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: mimeType || 'image/png',
-        data: imageBuffer.toString('base64')
-      }
-    }
+    ...blocks
   ];
   return messages;
 }
@@ -82,8 +92,8 @@ function extractCompleteText(body) {
   return text.trim();
 }
 
-function requestClaude({ apiKey, model, system, messages, imageBuffer, mimeType, onDelta, timeout }) {
-  const normalized = attachImage(normalizeMessages(messages), imageBuffer, mimeType);
+function requestClaude({ apiKey, model, system, messages, imageBuffer, mimeType, images, onDelta, timeout }) {
+  const normalized = attachImage(normalizeMessages(messages), imageBuffer, mimeType, images);
   if (!normalized.length) {
     throw new Error('No user content to send to Claude');
   }
@@ -231,6 +241,7 @@ async function complete(options) {
     system: options.system || '',
     messages: options.messages || [],
     imageBuffer: options.imageBuffer || null,
+    images: options.images || null,
     mimeType: options.mimeType || 'image/png',
     onDelta: options.onDelta,
     timeout: options.timeout

@@ -149,7 +149,7 @@ class LLMService {
     return messages;
   }
 
-  async runAlternateProvider({ kind, text, imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta }) {
+  async runAlternateProvider({ kind, text, imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta, systemOverride, userTextOverride, skipFinalize, omitHistory, omitImages }) {
     if (!this.isInitialized) {
       const name = this.provider === 'cursor' ? 'Cursor' : 'Claude';
       throw new Error(`LLM service not initialized. Check ${name} API key configuration.`);
@@ -166,7 +166,10 @@ class LLMService {
       let systemPrompt = '';
       let userText = text || '';
 
-      if (kind === 'image') {
+      if (systemOverride) {
+        systemPrompt = systemOverride;
+        userText = userTextOverride || userText;
+      } else if (kind === 'image') {
         systemPrompt = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
         userText = this.formatImageInstruction(activeSkill, programmingLanguage);
       } else if (kind === 'text') {
@@ -176,7 +179,7 @@ class LLMService {
       }
 
       const history = this.appendAlternateUserMessage(
-        this.buildAlternateHistory(sessionMemory),
+        omitHistory ? [] : this.buildAlternateHistory(sessionMemory),
         userText
       );
       const providerMod = this.provider === 'cursor'
@@ -188,10 +191,18 @@ class LLMService {
         : config.get('llm.claude.timeout');
 
       const sessionManager = this.getSessionManager();
+      const problemShots = sessionManager.getProblemScreenshots();
       const latestShot = kind === 'image' ? null : sessionManager.getLatestScreenshot();
-      const attachedImage = kind === 'image'
-        ? imageBuffer
-        : (latestShot && latestShot.buffer) || null;
+      const images = omitImages
+        ? []
+        : problemShots.length
+          ? problemShots
+          : (kind === 'image' && imageBuffer)
+            ? [{ buffer: imageBuffer, mimeType: mimeType || 'image/png' }]
+            : (latestShot && latestShot.buffer)
+              ? [latestShot]
+              : [];
+      const attachedImage = images.length ? images[images.length - 1].buffer : null;
 
       const fullText = await providerMod.complete({
         apiKey: this.getAlternateApiKey(),
@@ -199,14 +210,15 @@ class LLMService {
         system: systemPrompt,
         messages: history,
         imageBuffer: attachedImage,
-        mimeType: (kind === 'image' ? mimeType : latestShot && latestShot.mimeType) || 'image/png',
+        images,
+        mimeType: (images.length && images[images.length - 1].mimeType) || mimeType || 'image/png',
         onDelta: typeof onDelta === 'function' ? onDelta : null,
         timeout
       });
 
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(fullText, programmingLanguage)
-        : fullText;
+      const finalResponse = skipFinalize
+        ? String(fullText || '').trim()
+        : this.finalizeSkillResponse(fullText, activeSkill, programmingLanguage);
 
       return {
         response: finalResponse,
@@ -386,6 +398,92 @@ class LLMService {
     };
   }
 
+  assessmentProblemText(activeSkill) {
+    if (promptLoader.normalizeSkillName(activeSkill) !== 'oa') {
+      return '';
+    }
+    const sessionManager = this.getSessionManager();
+    const text = sessionManager.getAssessmentText && sessionManager.getAssessmentText();
+    return text && text.trim() ? text.trim() : '';
+  }
+
+  withAssessmentText(text, activeSkill) {
+    const problem = this.assessmentProblemText(activeSkill);
+    if (!problem) {
+      return { text, omitImages: false };
+    }
+    const body = String(text || '');
+    const marker = problem.slice(0, Math.min(80, problem.length));
+    const already = marker && body.includes(marker);
+    return {
+      text: already ? body : `Assessment item:\n${problem}\n\n${body}`,
+      omitImages: true
+    };
+  }
+
+  isUsableAssessmentText(text) {
+    const body = String(text || '').trim();
+    if (body.length < 40) {
+      return false;
+    }
+    if (/^(i'm sorry|i am sorry|i cannot|i can't|sorry,|as an ai)\b/i.test(body) && body.length < 280) {
+      return false;
+    }
+    return true;
+  }
+
+  async extractAssessmentText(imageBuffer, mimeType) {
+    const system = 'You copy an assessment question into plain text. Do not solve it and do not add advice.';
+    const instruction = 'Copy the visible question, constraints, samples, and any starter or input function exactly. If two screenshots are attached, one is the statement and the other is the function where the code starts. Include both. Do not solve.';
+    if (this.shouldUseAlternateProvider()) {
+      const result = await this.runAlternateProvider({
+        kind: 'image',
+        imageBuffer,
+        mimeType,
+        activeSkill: 'oa',
+        sessionMemory: [],
+        systemOverride: system,
+        userTextOverride: instruction,
+        skipFinalize: true,
+        omitHistory: true
+      });
+      return result && result.response ? result.response : '';
+    }
+    if (!this.isInitialized) {
+      return '';
+    }
+    const request = {
+      contents: [{
+        role: 'user',
+        parts: [{ text: instruction }, ...this.screenshotParts(imageBuffer, mimeType)]
+      }],
+      systemInstruction: { parts: [{ text: system }] }
+    };
+    this.applyGenerationDefaults(request);
+    return this.executeGeminiWithTransportFallback(request);
+  }
+
+  async solveOaFromTranscript(imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta) {
+    const transcript = await this.extractAssessmentText(imageBuffer, mimeType);
+    if (!this.isUsableAssessmentText(transcript)) {
+      const sessionManager = this.getSessionManager();
+      if (sessionManager.setAssessmentText) {
+        sessionManager.setAssessmentText('');
+      }
+      return null;
+    }
+    const sessionManager = this.getSessionManager();
+    if (sessionManager.setAssessmentText) {
+      sessionManager.setAssessmentText(transcript);
+    }
+    const prompt = `Solve this assessment item from the text below. Ignore any earlier code. The statement and the input function may both be included. Write the solution inside the function that is written out.\n\n${transcript}`;
+    const solveOptions = { omitImages: true, omitHistory: true };
+    if (typeof onDelta === 'function') {
+      return this.processTextWithSkillStream(prompt, activeSkill, sessionMemory, programmingLanguage, onDelta, solveOptions);
+    }
+    return this.processTextWithSkill(prompt, activeSkill, sessionMemory, programmingLanguage, solveOptions);
+  }
+
   /**
    * Process an image directly with Gemini using the active skill prompt.
    * The image buffer is sent as inlineData alongside a concise instruction.
@@ -398,6 +496,23 @@ class LLMService {
    * @returns {Promise<{response: string, metadata: object}>}
    */
   async processImageWithSkill(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null) {
+    if (promptLoader.normalizeSkillName(activeSkill) === 'oa') {
+      try {
+        const fromText = await this.solveOaFromTranscript(
+          imageBuffer,
+          mimeType,
+          activeSkill,
+          sessionMemory,
+          programmingLanguage,
+          null
+        );
+        if (fromText) {
+          return fromText;
+        }
+      } catch (error) {
+        logger.warn('OA text solve failed, using the screenshot', { error: error.message });
+      }
+    }
     if (this.shouldUseAlternateProvider()) {
       return this.runAlternateProvider({
         kind: 'image',
@@ -434,9 +549,7 @@ class LLMService {
       const responseText = await this.executeGeminiWithTransportFallback(request);
 
       // Enforce language in code fences if provided
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(responseText, programmingLanguage)
-        : responseText;
+      const finalResponse = this.finalizeSkillResponse(responseText, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM image processing', startTime, {
         activeSkill,
@@ -474,6 +587,23 @@ class LLMService {
   }
 
   async processImageWithSkillStream(imageBuffer, mimeType, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
+    if (promptLoader.normalizeSkillName(activeSkill) === 'oa') {
+      try {
+        const fromText = await this.solveOaFromTranscript(
+          imageBuffer,
+          mimeType,
+          activeSkill,
+          sessionMemory,
+          programmingLanguage,
+          onDelta
+        );
+        if (fromText) {
+          return fromText;
+        }
+      } catch (error) {
+        logger.warn('OA text solve failed, using the screenshot', { error: error.message });
+      }
+    }
     if (this.shouldUseAlternateProvider()) {
       try {
         return await this.runAlternateProvider({
@@ -521,9 +651,7 @@ class LLMService {
         }
       });
 
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(fullText, programmingLanguage)
-        : fullText;
+      const finalResponse = this.finalizeSkillResponse(fullText, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM image streaming', startTime, {
         activeSkill,
@@ -653,19 +781,43 @@ class LLMService {
     });
   }
 
-  attachLatestScreenshotToParts(parts) {
+  screenshotParts(imageBuffer, mimeType) {
     const sessionManager = this.getSessionManager();
-    const latest = sessionManager.getLatestScreenshot && sessionManager.getLatestScreenshot();
-    if (!latest || !latest.buffer) {
+    const problemShots = sessionManager.getProblemScreenshots();
+    const shots = problemShots.length
+      ? problemShots
+      : (imageBuffer && Buffer.isBuffer(imageBuffer))
+        ? [{ buffer: imageBuffer, mimeType: mimeType || 'image/png', base64: imageBuffer.toString('base64') }]
+        : [];
+    const latest = !shots.length && sessionManager.getLatestScreenshot && sessionManager.getLatestScreenshot();
+    const list = shots.length ? shots : (latest && latest.buffer ? [latest] : []);
+    return list.map((shot) => ({
+      inlineData: {
+        data: shot.base64 || shot.buffer.toString('base64'),
+        mimeType: shot.mimeType || 'image/png'
+      }
+    }));
+  }
+
+  attachLatestScreenshotToParts(parts) {
+    if (this._omitScreenshots) {
       return parts;
     }
-    parts.push({
-      inlineData: {
-        data: latest.base64 || latest.buffer.toString('base64'),
-        mimeType: latest.mimeType || 'image/png'
-      }
-    });
+    parts.push(...this.screenshotParts());
     return parts;
+  }
+
+  withoutScreenshots(build, omitImages) {
+    if (!omitImages) {
+      return build();
+    }
+    const previous = this._omitScreenshots;
+    this._omitScreenshots = true;
+    try {
+      return build();
+    } finally {
+      this._omitScreenshots = previous;
+    }
   }
 
   buildGeminiImageRequest(imageBuffer, mimeType, activeSkill, programmingLanguage, skillPrompt) {
@@ -677,19 +829,14 @@ class LLMService {
       request.systemInstruction = { parts: [{ text: skillPrompt }] };
     }
 
-    const imagePart = {
-      inlineData: {
-        data: imageBuffer.toString('base64'),
-        mimeType: mimeType || 'image/png'
-      }
-    };
+    const imageParts = this.screenshotParts(imageBuffer, mimeType);
     const instruction = this.formatImageInstruction(activeSkill, programmingLanguage);
     if (request.contents.length && request.contents[request.contents.length - 1].role === 'user') {
-      request.contents[request.contents.length - 1].parts.push({ text: instruction }, imagePart);
+      request.contents[request.contents.length - 1].parts.push({ text: instruction }, ...imageParts);
     } else {
       request.contents.push({
         role: 'user',
-        parts: [{ text: instruction }, imagePart]
+        parts: [{ text: instruction }, ...imageParts]
       });
     }
     return request;
@@ -704,17 +851,30 @@ class LLMService {
     if (skill === 'lld') {
       return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen low-level design problem and give classes, APIs, and production-ready code.${langNote}`;
     }
+    if (skill === 'oa') {
+      const panels = this.getSessionManager().getProblemScreenshots().length;
+      if (panels >= 2) {
+        return 'These screenshots are one assessment question split across the screen. One section is the statement. The other is the input function where the code must start. Write the solution inside that function and keep its name, parameters, and any input code already there. Do not invent a new function. If the newer screenshot is a different question, ignore the older one. If it is multiple choice, output only the option. No explanation.';
+      }
+      return 'This screenshot is one section of an assessment question. The statement and the input function are often on different parts of the screen. If the function is visible, write the code inside it. If it is multiple choice, true/false, or fill-in, output only the option or value and do not write a program. No explanation.';
+    }
     return `This screenshot is part of our ongoing conversation. Use everything we already discussed. Analyze the on-screen DSA problem fully: pattern, brute-force code, where that code fails, optimal approach and code, complexity, edge cases, and a dry run.${langNote}`;
   }
 
-  async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
+  async processTextWithSkill(text, activeSkill, sessionMemory = [], programmingLanguage = null, options = null) {
+    const prepared = this.withAssessmentText(text, activeSkill);
+    text = prepared.text;
+    const omitImages = (options && options.omitImages) || prepared.omitImages;
+    const omitHistory = !!(options && options.omitHistory);
     if (this.shouldUseAlternateProvider()) {
       return this.runAlternateProvider({
         kind: 'text',
         text,
         activeSkill,
         sessionMemory,
-        programmingLanguage
+        programmingLanguage,
+        omitImages,
+        omitHistory
       });
     }
 
@@ -734,13 +894,14 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      const geminiRequest = this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.withoutScreenshots(
+        () => this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage, { omitHistory }),
+        omitImages
+      );
       const response = await this.executeGeminiWithTransportFallback(geminiRequest);
       
       // Enforce language in code fences if programmingLanguage specified
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(response, programmingLanguage)
-        : response;
+      const finalResponse = this.finalizeSkillResponse(response, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM text processing', startTime, {
         activeSkill,
@@ -777,7 +938,11 @@ class LLMService {
     }
   }
 
-  async processTextWithSkillStream(text, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
+  async processTextWithSkillStream(text, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null, options = null) {
+    const prepared = this.withAssessmentText(text, activeSkill);
+    text = prepared.text;
+    const omitImages = (options && options.omitImages) || prepared.omitImages;
+    const omitHistory = !!(options && options.omitHistory);
     if (this.shouldUseAlternateProvider()) {
       try {
         return await this.runAlternateProvider({
@@ -786,14 +951,16 @@ class LLMService {
           activeSkill,
           sessionMemory,
           programmingLanguage,
-          onDelta
+          onDelta,
+          omitImages,
+          omitHistory
         });
       } catch (error) {
         logger.warn('Streaming text failed, falling back to non-streaming', {
           error: error.message,
           provider: this.provider
         });
-        return this.processTextWithSkill(text, activeSkill, sessionMemory, programmingLanguage);
+        return this.processTextWithSkill(text, activeSkill, sessionMemory, programmingLanguage, { omitImages, omitHistory });
       }
     }
 
@@ -805,7 +972,10 @@ class LLMService {
     this.requestCount++;
 
     try {
-      const geminiRequest = this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.withoutScreenshots(
+        () => this.buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage, { omitHistory }),
+        omitImages
+      );
 
       const fullText = await this.executeStreamingRequest(geminiRequest, (delta) => {
         if (typeof onDelta === 'function' && delta) {
@@ -813,9 +983,7 @@ class LLMService {
         }
       });
 
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(fullText, programmingLanguage)
-        : fullText;
+      const finalResponse = this.finalizeSkillResponse(fullText, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM text streaming', startTime, {
         activeSkill,
@@ -840,18 +1008,22 @@ class LLMService {
         error: error.message,
         requestId: this.requestCount
       });
-      return this.processTextWithSkill(text, activeSkill, sessionMemory, programmingLanguage);
+      return this.processTextWithSkill(text, activeSkill, sessionMemory, programmingLanguage, { omitImages, omitHistory });
     }
   }
 
   async processTranscriptionWithIntelligentResponse(text, activeSkill, sessionMemory = [], programmingLanguage = null) {
+    const prepared = this.withAssessmentText(text, activeSkill);
+    text = prepared.text;
+    const omitImages = prepared.omitImages;
     if (this.shouldUseAlternateProvider()) {
       return this.runAlternateProvider({
         kind: 'transcription',
         text,
         activeSkill,
         sessionMemory,
-        programmingLanguage
+        programmingLanguage,
+        omitImages
       });
     }
 
@@ -871,13 +1043,14 @@ class LLMService {
         requestId: this.requestCount
       });
 
-      const geminiRequest = this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.withoutScreenshots(
+        () => this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage),
+        omitImages
+      );
       const response = await this.executeGeminiWithTransportFallback(geminiRequest);
       
       // Enforce language in code fences if programmingLanguage specified
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(response, programmingLanguage)
-        : response;
+      const finalResponse = this.finalizeSkillResponse(response, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM transcription processing', startTime, {
         activeSkill,
@@ -919,6 +1092,78 @@ class LLMService {
    * Normalize all triple-backtick code fences to the selected programming language tag.
    * Does not alter the inner code; only ensures fence language tags are correct.
    */
+  finalizeSkillResponse(text, activeSkill, programmingLanguage) {
+    if (promptLoader.normalizeSkillName(activeSkill) === 'oa') {
+      return this.shapeOaResponse(text);
+    }
+    return programmingLanguage
+      ? this.enforceProgrammingLanguage(text, programmingLanguage)
+      : text;
+  }
+
+  isOaChoiceLine(line) {
+    const s = String(line || '').trim();
+    if (!s || s.length > 200) return false;
+    if (/^(here|this|the |we |note|explanation|approach|because|output|below)\b/i.test(s)) return false;
+    if (/^(\d+)\s*[\).\:]\s*\S/.test(s)) return true;
+    if (/^[A-E]\s*[\).\:]\s+\S/.test(s)) return true;
+    if (/^[A-E](\s*[,/&]\s*[A-E])+$/i.test(s)) return true;
+    if (/^(answer\s*[:\-]\s*)?(true|false)$/i.test(s)) return true;
+    if (/^answers?\s*[:\-]\s*\S/i.test(s)) return true;
+    return false;
+  }
+
+  isOaChoiceAnswer(text) {
+    const body = String(text || '');
+    if (/```/.test(body)) return false;
+    const lines = body.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (!lines.length || lines.length > 15) return false;
+    if (lines.every((line) => this.isOaChoiceLine(line))) return true;
+    if (lines.length === 1 && lines[0].length <= 80 && !/[{}();]|def |class |#include|function /.test(lines[0])) {
+      return true;
+    }
+    return false;
+  }
+
+  shapeOaResponse(text) {
+    const source = String(text || '').trim();
+    if (!source) return source;
+
+    const blocks = [];
+    const outside = [];
+    const re = /```([^\n`]*)\n([\s\S]*?)```/g;
+    let match;
+    let last = 0;
+    while ((match = re.exec(source))) {
+      outside.push(source.slice(last, match.index));
+      const body = (match[2] || '').trim();
+      if (body) {
+        blocks.push({
+          tag: (match[1] || '').trim().split(/\s+/)[0],
+          body
+        });
+      }
+      last = match.index + match[0].length;
+    }
+    outside.push(source.slice(last));
+
+    const lines = outside.join('\n').split('\n').map((line) => line.trim()).filter(Boolean);
+    const choices = lines.filter((line) => this.isOaChoiceLine(line));
+
+    if (blocks.length === 0) {
+      if (choices.length > 0 && choices.length < lines.length) {
+        return choices.join('\n');
+      }
+      return source;
+    }
+
+    const tag = (blocks.find((block) => block.tag) || blocks[0]).tag;
+    const body = blocks.map((block) => block.body).join('\n\n');
+    const code = tag ? '```' + tag + '\n' + body + '\n```' : body;
+    if (choices.length === 0) return code;
+    return choices.join('\n') + '\n\n' + code;
+  }
+
   enforceProgrammingLanguage(text, programmingLanguage) {
     try {
       if (!text || !programmingLanguage) return text;
@@ -943,11 +1188,11 @@ class LLMService {
     }
   }
 
-  buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage) {
+  buildGeminiRequest(text, activeSkill, sessionMemory, programmingLanguage, options = null) {
     // Check if we have the new conversation history format
     const sessionManager = this.getSessionManager();
     
-    if (sessionManager && typeof sessionManager.getConversationHistory === 'function') {
+    if (!(options && options.omitHistory) && sessionManager && typeof sessionManager.getConversationHistory === 'function') {
       const conversationHistory = sessionManager.getConversationHistory(CONVERSATION_TURN_LIMIT);
       const skillContext = sessionManager.getSkillContext(activeSkill, programmingLanguage);
       return this.buildGeminiRequestWithHistory(text, activeSkill, conversationHistory, skillContext, programmingLanguage);
@@ -1121,6 +1366,10 @@ class LLMService {
   }
 
   getIntelligentTranscriptionPrompt(activeSkill, programmingLanguage) {
+    if (promptLoader.normalizeSkillName(activeSkill) === 'oa') {
+      return promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
+    }
+
     let prompt = `# Intelligent Transcription Response System
 
 Assume you are asked a question in ${activeSkill.toUpperCase()} mode. Your job is to intelligently respond to question/message with appropriate brevity.
@@ -1328,6 +1577,9 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
    * streaming failure so reliability is never worse than before.
    */
   async processTranscriptionWithIntelligentResponseStream(text, activeSkill, sessionMemory = [], programmingLanguage = null, onDelta = null) {
+    const prepared = this.withAssessmentText(text, activeSkill);
+    text = prepared.text;
+    const omitImages = prepared.omitImages;
     if (this.shouldUseAlternateProvider()) {
       try {
         return await this.runAlternateProvider({
@@ -1336,7 +1588,8 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           activeSkill,
           sessionMemory,
           programmingLanguage,
-          onDelta
+          onDelta,
+          omitImages
         });
       } catch (error) {
         logger.warn('Streaming transcription failed, falling back to non-streaming', {
@@ -1355,7 +1608,10 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     this.requestCount++;
 
     try {
-      const geminiRequest = this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage);
+      const geminiRequest = this.withoutScreenshots(
+        () => this.buildIntelligentTranscriptionRequest(text, activeSkill, sessionMemory, programmingLanguage),
+        omitImages
+      );
 
       const fullText = await this.executeStreamingRequest(geminiRequest, (delta) => {
         if (typeof onDelta === 'function' && delta) {
@@ -1363,9 +1619,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
         }
       });
 
-      const finalResponse = programmingLanguage
-        ? this.enforceProgrammingLanguage(fullText, programmingLanguage)
-        : fullText;
+      const finalResponse = this.finalizeSkillResponse(fullText, activeSkill, programmingLanguage);
 
       logger.logPerformance('LLM transcription streaming', startTime, {
         activeSkill,
@@ -1711,6 +1965,7 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
 
     const fallbackResponses = {
       dsa: 'This appears to be a data structures and algorithms problem. Consider breaking it down into smaller components and identifying the appropriate algorithm or data structure to use.',
+      oa: 'Could not solve this assessment problem. Check the API key in Settings and capture the problem again.',
       lld: 'This looks like a low-level design question. Identify the core classes, public APIs, and how they collaborate, then implement the key types.',
       hld: 'This looks like a high-level design question. Cover requirements, scale, core services, data stores, APIs, and the main trade-offs.',
       default: 'I can help analyze this content. Please ensure your Gemini API key is properly configured for detailed analysis.'

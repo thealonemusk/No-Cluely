@@ -989,9 +989,24 @@ class ApplicationController {
     }
   }
 
+  beginFreshProblem() {
+    sessionManager.clear();
+    this._oaPanels = 0;
+    this._oaHoldForFunction = undefined;
+    this._utteranceBuffer = "";
+    if (this._utteranceTimer) {
+      clearTimeout(this._utteranceTimer);
+      this._utteranceTimer = null;
+    }
+    windowManager.hideLLMResponse();
+    windowManager.broadcastToAllWindows("session-cleared", { fresh: true });
+  }
+
   clearSessionMemory() {
     try {
       sessionManager.clear();
+      this._oaPanels = 0;
+      this._oaHoldForFunction = undefined;
       windowManager.broadcastToAllWindows("session-cleared");
       logger.info("Session memory cleared");
     } catch (error) {
@@ -1108,19 +1123,32 @@ class ApplicationController {
         return;
       }
 
-      sessionManager.setLatestScreenshot(capture.imageBuffer, capture.mimeType || 'image/png');
+      const oaCapture = this.activeSkill === "oa";
+      let oaNote = 'I captured a screenshot of the current problem. Continue our conversation and use this image together with everything we already discussed.';
+      if (oaCapture) {
+        const addingFunctionPanel = this._oaPanels === 1 && this._oaHoldForFunction !== false;
+        if (!addingFunctionPanel) {
+          this.beginFreshProblem();
+        }
+        sessionManager.addProblemScreenshot(capture.imageBuffer, capture.mimeType || 'image/png');
+        this._oaPanels = Math.min((this._oaPanels || 0) + 1, 2);
+        oaNote = this._oaPanels >= 2
+          ? 'Second screenshot of the same question. One section is the statement and the other is the input function where the code starts. Write the solution inside that function. If this screenshot is a different question, answer only this screenshot.'
+          : 'Screenshot of an assessment question. The input function may be in a separate section.';
+      } else {
+        sessionManager.setLatestScreenshot(capture.imageBuffer, capture.mimeType || 'image/png');
+      }
       const capturedBase64 = (sessionManager.getLatestScreenshot() || {}).base64
         || capture.imageBuffer.toString("base64");
-      sessionManager.addUserInput(
-        'I captured a screenshot of the current problem. Continue our conversation and use this image together with everything we already discussed.',
-        'screenshot'
-      );
+      sessionManager.addUserInput(oaNote, 'screenshot');
       this.sendToChatWindow("screenshot-preview", {
         dataUrl: `data:${capture.mimeType || "image/png"};base64,${capturedBase64}`
       });
-      this.sendToVoiceResponseWindows("transcription-received", {
-        text: '[Screenshot] Analyze this with our current conversation.'
-      });
+      if (!oaCapture) {
+        this.sendToVoiceResponseWindows("transcription-received", {
+          text: '[Screenshot] Analyze this with our current conversation.'
+        });
+      }
       this.broadcastAppStatus("thinking");
 
       const sessionHistory = this.getSessionTurns();
@@ -1150,6 +1178,9 @@ class ApplicationController {
         return;
       }
       this.persistAssistantTurn(llmResult, { isImageAnalysis: true });
+      if (oaCapture && this._oaPanels === 1) {
+        this._oaHoldForFunction = !llmService.isOaChoiceAnswer(llmResult.response);
+      }
       this.sendTranscriptionLLMResponseToVoiceTargets(llmResult);
       this.finishOverlayStatus(llmResult, { isImageAnalysis: true });
       this.endWork(workId);

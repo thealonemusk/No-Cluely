@@ -6,20 +6,25 @@ const logger = {
     warn: (...args) => console.warn('[MainWindowUI WARN]', ...args)
 };
 
-const AVAILABLE_SKILLS = ['dsa', 'lld', 'hld'];
+const AVAILABLE_SKILLS = ['dsa', 'oa', 'lld', 'hld'];
 const SKILL_DISPLAY_NAMES = {
     dsa: 'DSA',
+    oa: 'OA',
     lld: 'LLD',
     hld: 'HLD'
 };
 const SKILL_ICONS = {
     dsa: 'fa-brain',
+    oa: 'fa-file-code',
     lld: 'fa-cubes',
     hld: 'fa-sitemap'
 };
 
 function resolveSkill(skill) {
     const key = String(skill || '').toLowerCase().trim();
+    if (key === 'oa' || key === 'online-assessment' || key === 'assessment' || key === 'hackerrank') {
+        return 'oa';
+    }
     if (key === 'lld' || key === 'ood' || key === 'low-level-design' || key === 'low-level') {
         return 'lld';
     }

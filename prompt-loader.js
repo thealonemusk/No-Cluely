@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const AVAILABLE_SKILLS = ['dsa', 'lld', 'hld'];
+const AVAILABLE_SKILLS = ['dsa', 'oa', 'lld', 'hld'];
 
 class PromptLoader {
   constructor() {
@@ -9,7 +9,7 @@ class PromptLoader {
     this.promptsLoaded = false;
     this.skillPromptSent = new Set();
     this.availableSkills = AVAILABLE_SKILLS;
-    this.skillsRequiringProgrammingLanguage = ['dsa', 'lld'];
+    this.skillsRequiringProgrammingLanguage = ['dsa', 'oa', 'lld'];
   }
 
   /**
@@ -100,6 +100,12 @@ STRICT REQUIREMENTS:
 - After the optimal code, list edge cases and what the code does on each.
 - If the problem has a template, implement that template in both versions when possible.
 - If the input is only a problem statement, do not ask for clarification — solve it fully.`;
+        break;
+      case 'oa':
+        languageInjection = `\n\n## SELECTED LANGUAGE: ${languageUpper}
+- Use ${languageTitle} only when the page does not already show a language or starter code.
+- A coding answer uses the fence tag \`\`\`${fenceTag}\`\`\`.
+- Multiple-choice, true/false, and fill-in answers are not code. Do not write a program for them.`;
         break;
       case 'lld':
         languageInjection = `\n\n## IMPLEMENTATION LANGUAGE: ${languageUpper}
@@ -338,6 +344,12 @@ STRICT REQUIREMENTS:
       'data-structures-algorithms': 'dsa',
       coding: 'dsa',
       programming: 'dsa',
+      oa: 'oa',
+      'online-assessment': 'oa',
+      assessment: 'oa',
+      hackerrank: 'oa',
+      leetcode: 'oa',
+      codesignal: 'oa',
       lld: 'lld',
       'low-level-design': 'lld',
       'low-level': 'lld',

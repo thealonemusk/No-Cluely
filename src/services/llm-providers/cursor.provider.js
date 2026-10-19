@@ -85,13 +85,29 @@ async function disposeAgent(agent) {
  * `{ text, images? }`; SendOptions has no image field at all, so anything put
  * there is silently dropped and the model answers having never seen the image.
  */
-function buildUserMessage(prompt, imageBuffer, mimeType) {
-  const message = { text: prompt };
+function collectImages(imageBuffer, mimeType, images) {
+  if (Array.isArray(images) && images.length) {
+    return images
+      .filter((shot) => shot && shot.buffer && Buffer.isBuffer(shot.buffer) && shot.buffer.length)
+      .map((shot) => ({
+        data: shot.base64 || shot.buffer.toString('base64'),
+        mimeType: shot.mimeType || 'image/png'
+      }));
+  }
   if (imageBuffer && Buffer.isBuffer(imageBuffer) && imageBuffer.length) {
-    message.images = [{
+    return [{
       data: imageBuffer.toString('base64'),
       mimeType: mimeType || 'image/png'
     }];
+  }
+  return [];
+}
+
+function buildUserMessage(prompt, imageBuffer, mimeType, images) {
+  const message = { text: prompt };
+  const attached = collectImages(imageBuffer, mimeType, images);
+  if (attached.length) {
+    message.images = attached;
   }
   return message;
 }
@@ -144,7 +160,7 @@ async function complete(options) {
 
   const Agent = await loadAgent();
   const cwd = ensureEmptyCwd();
-  const modelId = options.model || 'grok-4.6';
+  const modelId = options.model || 'grok-4.7-high';
   const timeout = Number(options.timeout);
   const deadline = Number.isFinite(timeout) && timeout > 0 ? Date.now() + timeout : null;
   const remaining = () => (deadline === null ? 0 : Math.max(1, deadline - Date.now()));
@@ -184,7 +200,7 @@ async function complete(options) {
     }
 
     const run = await withTimeout(
-      agent.send(buildUserMessage(prompt, options.imageBuffer, options.mimeType), sendOptions),
+      agent.send(buildUserMessage(prompt, options.imageBuffer, options.mimeType, options.images), sendOptions),
       remaining(),
       'send'
     );

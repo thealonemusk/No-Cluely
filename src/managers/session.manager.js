@@ -11,6 +11,8 @@ class SessionManager {
     this.currentSkill = 'dsa'; // Default skill is DSA
     this.isInitialized = false;
     this.latestScreenshot = null;
+    this.problemScreenshots = [];
+    this.assessmentText = '';
     
     this.initializeWithSkillPrompts();
   }
@@ -127,6 +129,7 @@ class SessionManager {
   }
 
   setLatestScreenshot(imageBuffer, mimeType = 'image/png') {
+    this.problemScreenshots = [];
     if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
       this.latestScreenshot = null;
       return;
@@ -138,6 +141,34 @@ class SessionManager {
       mimeType: mimeType || 'image/png',
       base64: imageBuffer.toString('base64')
     };
+  }
+
+  addProblemScreenshot(imageBuffer, mimeType = 'image/png') {
+    if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+      return;
+    }
+    const shot = {
+      buffer: imageBuffer,
+      mimeType: mimeType || 'image/png',
+      base64: imageBuffer.toString('base64')
+    };
+    this.problemScreenshots.push(shot);
+    if (this.problemScreenshots.length > 2) {
+      this.problemScreenshots = this.problemScreenshots.slice(-2);
+    }
+    this.latestScreenshot = shot;
+  }
+
+  getProblemScreenshots() {
+    return this.problemScreenshots;
+  }
+
+  setAssessmentText(text) {
+    this.assessmentText = String(text || '').trim();
+  }
+
+  getAssessmentText() {
+    return this.assessmentText || '';
   }
 
   getLatestScreenshot() {
@@ -572,6 +603,8 @@ class SessionManager {
     this.sessionMemory = [];
     this.isInitialized = false;
     this.latestScreenshot = null;
+    this.problemScreenshots = [];
+    this.assessmentText = '';
     
     logger.info('Session memory cleared', { eventCount });
     

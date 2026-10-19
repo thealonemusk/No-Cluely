@@ -56,7 +56,7 @@ class ConfigManager {
           maxOutputTokens: 8192
         },
         cursor: {
-          model: 'grok-4.6',
+          model: 'grok-4.7-high',
           timeout: 120000
         },
         gemini: {
