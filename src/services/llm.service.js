@@ -149,7 +149,7 @@ class LLMService {
     return messages;
   }
 
-  async runAlternateProvider({ kind, text, imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta, systemOverride, userTextOverride, skipFinalize, omitHistory, omitImages }) {
+  async runAlternateProvider({ kind, text, imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta, systemOverride, userTextOverride, skipFinalize, omitHistory, omitImages, isolate }) {
     if (!this.isInitialized) {
       const name = this.provider === 'cursor' ? 'Cursor' : 'Claude';
       throw new Error(`LLM service not initialized. Check ${name} API key configuration.`);
@@ -213,7 +213,8 @@ class LLMService {
         images,
         mimeType: (images.length && images[images.length - 1].mimeType) || mimeType || 'image/png',
         onDelta: typeof onDelta === 'function' ? onDelta : null,
-        timeout
+        timeout,
+        isolate: !!isolate
       });
 
       const finalResponse = skipFinalize
@@ -432,56 +433,107 @@ class LLMService {
     return true;
   }
 
-  async extractAssessmentText(imageBuffer, mimeType) {
-    const system = 'You copy an assessment question into plain text. Do not solve it and do not add advice.';
-    const instruction = 'Copy the visible question, constraints, samples, and any starter or input function exactly. If two screenshots are attached, one is the statement and the other is the function where the code starts. Include both. Do not solve.';
+  splitOaPass(text) {
+    const source = String(text || '').trim();
+    const match = source.match(/^PROBLEM\s*:\s*([\s\S]*?)\nANSWER\s*:\s*([\s\S]*)$/i);
+    if (!match) {
+      return { problem: '', answer: source };
+    }
+    return { problem: match[1].trim(), answer: match[2].trim() };
+  }
+
+  streamOaAnswer(onDelta) {
+    if (typeof onDelta !== 'function') {
+      return null;
+    }
+    let pending = '';
+    let mode = 'detect';
+    return (delta) => {
+      if (!delta) return;
+      if (mode === 'stream') {
+        onDelta(delta);
+        return;
+      }
+      pending += delta;
+      if (mode === 'detect') {
+        const head = pending.trimStart();
+        if (head.length < 8 && !head.includes('\n')) return;
+        mode = /^PROBLEM\s*:/i.test(head) ? 'buffer' : 'stream';
+        if (mode === 'stream') {
+          onDelta(pending);
+          pending = '';
+          return;
+        }
+      }
+      const marker = pending.search(/\nANSWER\s*:/i);
+      if (marker === -1) return;
+      const rest = pending.slice(marker).replace(/^\nANSWER\s*:/i, '');
+      mode = 'stream';
+      pending = '';
+      if (rest) onDelta(rest);
+    };
+  }
+
+  async solveOaFromTranscript(imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta) {
+    const panels = this.getSessionManager().getProblemScreenshots().length;
+    const read = panels >= 2
+      ? 'Two screenshots of one question. One is the statement. The other is the input function where the code starts. Read both.'
+      : 'Read this screenshot. The statement and the input function are often on different parts of the screen.';
+    const instruction = `${read}\n\nOn this turn write exactly two parts.\nPROBLEM:\n<the question, constraints, samples, and the starter function if it is visible>\nANSWER:\n<only the final answer. A coding answer is one fenced block inside the given function, with the best time and the best space. A multiple-choice answer is only the option.>`;
+    const skill = promptLoader.getSkillPrompt(activeSkill, programmingLanguage) || '';
+    const system = `${skill}\n\nOn a screenshot turn the user asks for PROBLEM: and then ANSWER:. Use that format for this turn. The ANSWER part still follows the rules above.`;
+    const filtered = this.streamOaAnswer(onDelta);
+    let raw = '';
     if (this.shouldUseAlternateProvider()) {
       const result = await this.runAlternateProvider({
         kind: 'image',
         imageBuffer,
         mimeType,
-        activeSkill: 'oa',
+        activeSkill,
         sessionMemory: [],
         systemOverride: system,
         userTextOverride: instruction,
         skipFinalize: true,
-        omitHistory: true
+        omitHistory: true,
+        isolate: panels < 2,
+        onDelta: filtered
       });
-      return result && result.response ? result.response : '';
+      raw = result && result.response ? result.response : '';
+    } else {
+      if (!this.isInitialized) return null;
+      const request = {
+        contents: [{
+          role: 'user',
+          parts: [{ text: instruction }, ...this.screenshotParts(imageBuffer, mimeType)]
+        }],
+        systemInstruction: { parts: [{ text: system }] }
+      };
+      this.applyGenerationDefaults(request);
+      raw = filtered
+        ? await this.executeStreamingRequest(request, filtered)
+        : await this.executeGeminiWithTransportFallback(request);
     }
-    if (!this.isInitialized) {
-      return '';
-    }
-    const request = {
-      contents: [{
-        role: 'user',
-        parts: [{ text: instruction }, ...this.screenshotParts(imageBuffer, mimeType)]
-      }],
-      systemInstruction: { parts: [{ text: system }] }
-    };
-    this.applyGenerationDefaults(request);
-    return this.executeGeminiWithTransportFallback(request);
-  }
-
-  async solveOaFromTranscript(imageBuffer, mimeType, activeSkill, sessionMemory, programmingLanguage, onDelta) {
-    const transcript = await this.extractAssessmentText(imageBuffer, mimeType);
-    if (!this.isUsableAssessmentText(transcript)) {
+    const parts = this.splitOaPass(raw);
+    if (this.isUsableAssessmentText(parts.problem)) {
       const sessionManager = this.getSessionManager();
       if (sessionManager.setAssessmentText) {
-        sessionManager.setAssessmentText('');
+        sessionManager.setAssessmentText(parts.problem);
       }
-      return null;
     }
-    const sessionManager = this.getSessionManager();
-    if (sessionManager.setAssessmentText) {
-      sessionManager.setAssessmentText(transcript);
-    }
-    const prompt = `Solve this assessment item from the text below. Ignore any earlier code. The statement and the input function may both be included. Write the solution inside the function that is written out.\n\n${transcript}`;
-    const solveOptions = { omitImages: true, omitHistory: true };
-    if (typeof onDelta === 'function') {
-      return this.processTextWithSkillStream(prompt, activeSkill, sessionMemory, programmingLanguage, onDelta, solveOptions);
-    }
-    return this.processTextWithSkill(prompt, activeSkill, sessionMemory, programmingLanguage, solveOptions);
+    const answer = this.shapeOaResponse(parts.answer);
+    if (!answer || !answer.trim()) return null;
+    return {
+      response: answer,
+      metadata: {
+        skill: activeSkill,
+        programmingLanguage,
+        usedFallback: false,
+        streamed: typeof onDelta === 'function',
+        isImageAnalysis: true,
+        mimeType,
+        provider: this.provider
+      }
+    };
   }
 
   /**

@@ -147,7 +147,21 @@ function describeRunFailure(result) {
   return 'Cursor agent run failed';
 }
 
+let warmAgent = null;
+let warmKey = '';
+let sendQueue = Promise.resolve();
+
+function enqueue(task) {
+  const run = sendQueue.then(task, task);
+  sendQueue = run.then(() => {}, () => {});
+  return run;
+}
+
 async function complete(options) {
+  return enqueue(() => completeOnce(options));
+}
+
+async function completeOnce(options) {
   const apiKey = (options.apiKey || '').trim();
   if (!apiKey) {
     throw new Error('Cursor API key is not configured');
@@ -164,20 +178,32 @@ async function complete(options) {
   const timeout = Number(options.timeout);
   const deadline = Number.isFinite(timeout) && timeout > 0 ? Date.now() + timeout : null;
   const remaining = () => (deadline === null ? 0 : Math.max(1, deadline - Date.now()));
-  let agent = null;
+  const key = `${apiKey}\n${modelId}`;
 
   try {
-    agent = await withTimeout(Agent.create({
-      apiKey,
-      model: { id: modelId },
-      tools: NO_TOOLS,
-      local: {
-        cwd,
-        // Do not load project/user/team rule files from disk. They are
-        // irrelevant here and only add startup work and stray instructions.
-        settingSources: []
+    if (options.isolate || !warmAgent || warmKey !== key) {
+      const previous = warmAgent;
+      warmAgent = null;
+      warmKey = '';
+      if (previous) {
+        await disposeAgent(previous);
       }
-    }), remaining(), 'agent startup');
+    }
+    if (!warmAgent) {
+      warmAgent = await withTimeout(Agent.create({
+        apiKey,
+        model: { id: modelId },
+        tools: NO_TOOLS,
+        local: {
+          cwd,
+          // Do not load project/user/team rule files from disk. They are
+          // irrelevant here and only add startup work and stray instructions.
+          settingSources: []
+        }
+      }), remaining(), 'agent startup');
+      warmKey = key;
+    }
+    const agent = warmAgent;
 
     const wantsDeltas = typeof options.onDelta === 'function';
     let streamedText = '';
@@ -234,11 +260,18 @@ async function complete(options) {
       throw new Error('Empty response from Cursor');
     }
     return fullText.trim();
-  } finally {
-    // Tearing the agent down is cleanup, not part of producing the answer.
-    // Awaiting it here held the finished response back from the UI for as
-    // long as the SDK took to shut the session down.
-    disposeAgent(agent);
+  } catch (error) {
+    const failed = warmAgent;
+    const reused = !options.isolate && !!failed;
+    warmAgent = null;
+    warmKey = '';
+    if (failed) {
+      await disposeAgent(failed);
+    }
+    if (reused && !options._retried) {
+      return completeOnce({ ...options, _retried: true, isolate: true });
+    }
+    throw error;
   }
 }
 
