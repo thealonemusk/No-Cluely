@@ -126,7 +126,7 @@ class ApplicationController {
     this._utteranceBuffer = "";
     this._utteranceTimer = null;
     this._utteranceDispatchInFlight = false;
-    this._utteranceCoalesceMs = 250;
+    this._speechCaptureOpen = false;
     this._workId = 0;
     this._lastAnswer = "";
 
@@ -374,7 +374,8 @@ class ApplicationController {
       if (request.hostname === 'generativelanguage.googleapis.com') {
         callback(0); // Trust Google's certificates
       } else {
-        callback(-2); // Use default verification
+        // -2 rejects the certificate. -3 keeps Chromium's normal check.
+        callback(-3);
       }
     });
     
@@ -446,6 +447,7 @@ class ApplicationController {
       "Control+Shift+\\": () => this.clearSessionMemory(),
       "Control+Shift+L": () => this.copyLastAnswer(),
       "Control+,": () => windowManager.showSettings(),
+      "Control+Shift+Q": () => this.quitApplication(),
       "Alt+A": () => windowManager.toggleInteraction(),
       "Alt+R": () => this.toggleSpeechRecognition(),
       "Control+Shift+T": () => windowManager.forceAlwaysOnTopForAllWindows(),
@@ -468,11 +470,22 @@ class ApplicationController {
 
   setupServiceEventHandlers() {
     speechService.on("recording-started", () => {
+      this._speechCaptureOpen = true;
       windowManager.handleRecordingStarted();
     });
 
     speechService.on("recording-stopped", () => {
+      this._speechCaptureOpen = false;
       windowManager.handleRecordingStopped();
+      // The last transcript arrives after this event. Give it time to join
+      // the buffer, then answer. A new fragment resets this timer.
+      if (this._utteranceBuffer.trim() && !speechService.isManualCaptureMode()) {
+        if (this._utteranceTimer) clearTimeout(this._utteranceTimer);
+        this._utteranceTimer = setTimeout(() => {
+          this._utteranceTimer = null;
+          this.dispatchCoalescedUtterance();
+        }, 2000);
+      }
     });
 
     speechService.on("transcription", (text) => {
@@ -900,28 +913,7 @@ class ApplicationController {
     ipcMain.handle("resize-llm-window-for-content", resizeLlmWindow);
 
     ipcMain.handle("quit-app", () => {
-      logger.info("Quit app requested via IPC");
-      try {
-        // Force quit the application
-        const { app } = require("electron");
-
-        // Close all windows first
-        windowManager.destroyAllWindows();
-
-        // Unregister shortcuts
-        globalShortcut.unregisterAll();
-
-        // Force quit
-        app.quit();
-
-        // If the above doesn't work, force exit
-        setTimeout(() => {
-          process.exit(0);
-        }, 2000);
-      } catch (error) {
-        logger.error("Error during quit:", error);
-        process.exit(1);
-      }
+      this.quitApplication();
     });
 
     // Handle close settings
@@ -946,18 +938,37 @@ class ApplicationController {
 
     // Handle quit app (alternative method)
     ipcMain.on("quit-app", () => {
-      logger.info("Quit app requested via IPC (on method)");
-      try {
-        const { app } = require("electron");
-        windowManager.destroyAllWindows();
-        globalShortcut.unregisterAll();
-        app.quit();
-        setTimeout(() => process.exit(0), 1000);
-      } catch (error) {
-        logger.error("Error during quit (on method):", error);
-        process.exit(1);
-      }
+      this.quitApplication();
     });
+
+    ipcMain.on("set-ignore-mouse-events", (event, data) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win || win.isDestroyed()) {
+        return;
+      }
+      if (data && data.ignore) {
+        if (!windowManager.isInteractive) {
+          win.setIgnoreMouseEvents(true, { forward: true });
+        }
+        return;
+      }
+      win.setIgnoreMouseEvents(false);
+    });
+  }
+
+  quitApplication() {
+    logger.info("Quit app requested");
+    try {
+      windowManager.destroyAllWindows();
+      globalShortcut.unregisterAll();
+      app.quit();
+      setTimeout(() => {
+        process.exit(0);
+      }, 1500);
+    } catch (error) {
+      logger.error("Error during quit:", error);
+      process.exit(1);
+    }
   }
 
   toggleSpeechRecognition() {
@@ -1299,10 +1310,14 @@ class ApplicationController {
       return;
     }
 
+    // While the mic is open, wait long enough that the next sentence can
+    // arrive and reset this timer. After stop, answer shortly after the
+    // last result.
+    const delay = this._speechCaptureOpen ? 4000 : 500;
     this._utteranceTimer = setTimeout(() => {
       this._utteranceTimer = null;
       this.dispatchCoalescedUtterance();
-    }, this._utteranceCoalesceMs);
+    }, delay);
   }
 
   /**
@@ -1313,7 +1328,7 @@ class ApplicationController {
   isCasualUtterance(text) {
     const clean = String(text || "").trim().toLowerCase();
     if (!clean) return true;
-    return /^(hi|hello|hey|ok|okay|yeah|yes|no|thanks|thank you|hmm+|uh+|um+)$/.test(clean);
+    return /^(hmm+|uh+|um+|er+|ah+)$/.test(clean);
   }
 
   async dispatchCoalescedUtterance() {

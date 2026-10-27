@@ -75,6 +75,10 @@
         background: rgba(255, 255, 255, 0.22);
         color: #fff;
       }
+      .icon-button.danger:hover {
+        background: rgba(255, 71, 87, 0.35);
+        color: #fff;
+      }
       .recording-indicator {
         width: 8px;
         height: 8px;
@@ -685,6 +689,9 @@
           <button class="icon-button" id="clearHistoryBtn" title="New problem — clear chat and session">
             <i class="fas fa-trash"></i>
           </button>
+          <button class="icon-button danger" id="quitAppBtn" title="Quit (Ctrl+Shift+Q)">
+            <i class="fas fa-times"></i>
+          </button>
         </div>
       </div>
 
@@ -734,6 +741,7 @@
       const listeningDuration = document.getElementById('listeningDuration');
       const interimOverlay = document.getElementById('interimOverlay');
       const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+      const quitAppBtn = document.getElementById('quitAppBtn');
 
       let isRecording = false;
       let isInteractive = true;
@@ -1029,6 +1037,16 @@
         showListeningAnimation();
       }
 
+      let liveTranscript = null;
+
+      function closeLiveTranscript() {
+        if (liveTranscript && chatHistory.length) {
+          const last = chatHistory[chatHistory.length - 1];
+          if (last && last.live) delete last.live;
+        }
+        liveTranscript = null;
+      }
+
       function handleRecordingStopped() {
         isRecording = false;
 
@@ -1040,19 +1058,33 @@
         }
 
         hideListeningAnimation();
-        addMessage('Stopped Listening', 'system');
       }
 
       function handleTranscription(text) {
-        if (text && typeof text === 'string' && text.trim().length > 0) {
-          // Hide listening animation first
-          hideListeningAnimation();
-
-          addMessage(text.trim(), 'transcription');
-          showThinkingIndicator();
-        } else {
+        const clean = text && typeof text === 'string' ? text.trim() : '';
+        if (!clean) {
           console.warn('Invalid or empty transcription text - ignoring:', text);
+          return;
         }
+
+        if (liveTranscript && liveTranscript.el) {
+          liveTranscript.text = `${liveTranscript.text} ${clean}`.trim();
+          liveTranscript.el.textContent = liveTranscript.text;
+          const last = chatHistory[chatHistory.length - 1];
+          if (last && last.live) {
+            last.text = liveTranscript.text;
+            saveHistory();
+          }
+          chatMessages.scrollTop = chatMessages.scrollHeight;
+          return;
+        }
+
+        addMessage(clean, 'transcription');
+        const nodes = chatMessages.querySelectorAll('.message.transcription .message-text');
+        const el = nodes[nodes.length - 1] || null;
+        liveTranscript = { el, text: clean };
+        const last = chatHistory[chatHistory.length - 1];
+        if (last && last.kind === 'message') last.live = true;
       }
 
       // Helpers to capture AI response into chat (text + snippets)
@@ -1276,16 +1308,10 @@
         });
 
         // Listen for speech status
-        whysperAPI.onSpeechStatus((event, data) => {
-          if (data && data.status) {
-            addMessage(data.status, 'system');
-
-            if (data.status.includes('started') || data.status.includes('Recording')) {
-              handleRecordingStarted();
-            } else if (data.status.includes('stopped') || data.status.includes('ended')) {
-              handleRecordingStopped();
-            }
-          }
+        whysperAPI.onSpeechStatus(() => {
+          // Status strings used to be inserted into the transcript and the
+          // word "stopped" ended the listening UI twice. Recording events
+          // own that state. Errors arrive on the speech-error channel.
         });
 
         // Listen for speech errors
@@ -1298,6 +1324,7 @@
 
         // Listen for other events
         whysperAPI.onRecordingStarted(() => {
+          closeLiveTranscript();
           handleRecordingStarted();
         });
 
@@ -1337,6 +1364,7 @@
 
         if (whysperAPI.onTranscriptionLlmResponseStart) {
           whysperAPI.onTranscriptionLlmResponseStart((event, data) => {
+            closeLiveTranscript();
             if (data && data.messageId) beginStreamingResponse(data.messageId);
           });
         }
@@ -1351,6 +1379,25 @@
       // UI Event Listeners
       if (clearHistoryBtn) {
         clearHistoryBtn.addEventListener('click', () => clearChatHistory());
+      }
+
+      if (quitAppBtn) {
+        quitAppBtn.addEventListener('mouseenter', () => {
+          if (whysperAPI && whysperAPI.setIgnoreMouseEvents) {
+            whysperAPI.setIgnoreMouseEvents(false);
+          }
+        });
+        quitAppBtn.addEventListener('mouseleave', () => {
+          if (!isInteractive && whysperAPI && whysperAPI.setIgnoreMouseEvents) {
+            whysperAPI.setIgnoreMouseEvents(true);
+          }
+        });
+        quitAppBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (whysperAPI && whysperAPI.quit) {
+            whysperAPI.quit();
+          }
+        });
       }
 
       if (micButton) {

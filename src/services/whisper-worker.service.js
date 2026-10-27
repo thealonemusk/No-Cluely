@@ -44,13 +44,14 @@ class WhisperWorkerService {
     const result = await this._request({
       action: 'transcribe',
       audio_path: audioPath,
-      model: options.model || 'base',
+      model: options.model || 'small',
       language: options.language || 'auto',
       model_dir: options.modelDir || null,
       device: options.device || 'auto',
       compute_type: options.computeType || 'auto',
       cpu_threads: options.cpuThreads || 0,
-      beam_size: options.beamSize || 0
+      beam_size: options.beamSize || 0,
+      initial_prompt: options.initialPrompt || ''
     });
     this._scheduleIdleUnload();
     return result;
@@ -63,7 +64,7 @@ class WhisperWorkerService {
     this._clearIdleTimer();
     return this._request({
       action: 'warmup',
-      model: options.model || 'base',
+      model: options.model || 'small',
       model_dir: options.modelDir || null,
       device: options.device || 'auto',
       compute_type: options.computeType || 'auto',

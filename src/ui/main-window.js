@@ -53,7 +53,10 @@ class MainWindowUI {
         this._audioContext = null;
         this._mediaStream = null;
         this._scriptNode = null;
+        this._muteGain = null;
         this._captureInterval = null;
+        this._prerollChunks = [];
+        this._drainingCapture = false;
         
         this.availableSkills = AVAILABLE_SKILLS;
         
@@ -301,6 +304,7 @@ class MainWindowUI {
         this.skillIndicator = document.getElementById('skillIndicator');
         this.settingsIndicator = document.getElementById('settingsIndicator'); // Optional
         this.micButton = document.getElementById('micButton');
+        this.quitButton = document.getElementById('quitButton');
     this.infoButton = document.getElementById('infoButton');
     this.shortcutsPopover = document.getElementById('shortcutsPopover');
 
@@ -331,6 +335,36 @@ class MainWindowUI {
                 }
             });
         }
+
+        if (this.quitButton) {
+            this.quitButton.addEventListener('mouseenter', () => {
+                if (window.electronAPI && window.electronAPI.setIgnoreMouseEvents) {
+                    window.electronAPI.setIgnoreMouseEvents(false);
+                }
+            });
+            this.quitButton.addEventListener('mouseleave', () => {
+                if (!this.isInteractive && window.electronAPI && window.electronAPI.setIgnoreMouseEvents) {
+                    window.electronAPI.setIgnoreMouseEvents(true);
+                }
+            });
+            this.quitButton.addEventListener('click', (event) => {
+                event.stopPropagation();
+                if (window.electronAPI && window.electronAPI.quit) {
+                    window.electronAPI.quit();
+                }
+            });
+        }
+
+        // Open the device on press so the click's first syllable is already buffered.
+        this.micButton.addEventListener('pointerdown', () => {
+            const platform = (typeof navigator !== 'undefined' &&
+              ((navigator.userAgentData && navigator.userAgentData.platform) ||
+                navigator.platform || '')).toLowerCase();
+            const useRendererCapture = platform.includes('win') || platform.includes('mac');
+            if (this.speechAvailable && useRendererCapture) {
+                this._startRendererAudioCapture();
+            }
+        });
 
         // Add click handler for microphone
         this.micButton.addEventListener('click', async () => {
@@ -640,6 +674,12 @@ class MainWindowUI {
     }
 
     handleRecordingStarted() {
+        this._cancelWarmRelease();
+        if (this._drainTimer) {
+            clearTimeout(this._drainTimer);
+            this._drainTimer = null;
+        }
+        this._drainingCapture = false;
         this.isRecording = true;
         if (this.micButton) {
             this.micButton.classList.add('recording');
@@ -655,7 +695,7 @@ class MainWindowUI {
             navigator.platform || '')).toLowerCase();
         const useRendererCapture = platform.includes('win') || platform.includes('mac');
         if (useRendererCapture) {
-            this._startRendererAudioCapture();
+            this._startRendererAudioCapture().then(() => this._flushCapturePreroll());
         }
         logger.debug('Recording started', { component: 'MainWindowUI' });
     }
@@ -665,8 +705,80 @@ class MainWindowUI {
         if (this.micButton) {
             this.micButton.classList.remove('recording');
         }
-        this._stopRendererAudioCapture();
+        // Keep the graph alive briefly so the last buffer is delivered, then
+        // hold the device so the next press already has a pre-roll.
+        this._drainingCapture = true;
+        if (this._drainTimer) clearTimeout(this._drainTimer);
+        this._drainTimer = setTimeout(() => {
+            this._drainTimer = null;
+            this._drainingCapture = false;
+            this._armWarmRelease();
+        }, 300);
         logger.debug('Recording stopped', { component: 'MainWindowUI' });
+    }
+
+    _armWarmRelease() {
+        this._cancelWarmRelease();
+        this._warmTimer = setTimeout(() => {
+            this._warmTimer = null;
+            if (!this.isRecording && !this._drainingCapture) {
+                this._stopRendererAudioCapture();
+            }
+        }, 45000);
+    }
+
+    _cancelWarmRelease() {
+        if (this._warmTimer) {
+            clearTimeout(this._warmTimer);
+            this._warmTimer = null;
+        }
+    }
+
+    _pushCapturePreroll(bytes) {
+        if (!bytes || !bytes.length) return;
+        this._prerollChunks.push(bytes);
+        const maxBytes = 16000 * 2 * 0.6;
+        let total = this._prerollChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        while (total > maxBytes && this._prerollChunks.length > 1) {
+            total -= this._prerollChunks.shift().length;
+        }
+    }
+
+    _flushCapturePreroll() {
+        const queued = this._prerollChunks;
+        this._prerollChunks = [];
+        if (!window.electronAPI || !window.electronAPI.sendAudioChunk) return;
+        for (const chunk of queued) {
+            window.electronAPI.sendAudioChunk(chunk);
+        }
+    }
+
+    /**
+     * Windows often ignores a requested 16 kHz AudioContext and delivers 44.1
+     * or 48 kHz. Whisper was then told those samples were 16 kHz, so speech
+     * came out slow and wrong. Average down to 16 kHz when the device rate differs.
+     */
+    _downsampleTo16k(input, inputRate) {
+        if (!input || !inputRate || Math.abs(inputRate - 16000) < 1) {
+            return input;
+        }
+        const ratio = inputRate / 16000;
+        const outLength = Math.max(1, Math.floor(input.length / ratio));
+        const out = new Float32Array(outLength);
+        for (let i = 0; i < outLength; i++) {
+            const start = Math.floor(i * ratio);
+            let end = Math.floor((i + 1) * ratio);
+            if (end <= start) end = start + 1;
+            if (end > input.length) end = input.length;
+            let sum = 0;
+            let count = 0;
+            for (let j = start; j < end; j++) {
+                sum += input[j];
+                count++;
+            }
+            out[i] = count ? sum / count : 0;
+        }
+        return out;
     }
 
     /**
@@ -675,14 +787,22 @@ class MainWindowUI {
      * dependencies are unavailable.
      */
     async _startRendererAudioCapture() {
-        try {
-            this._stopRendererAudioCapture();
+        if (this._audioContext && this._mediaStream) {
+            if (this._audioContext.state === 'suspended') {
+                this._audioContext.resume().catch(() => {});
+            }
+            return;
+        }
+        if (this._captureOpening) return this._captureOpening;
 
+        this._captureOpening = (async () => {
+        try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
+                    channelCount: 1,
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
                     sampleRate: { ideal: 16000 }
                 }
             });
@@ -692,27 +812,46 @@ class MainWindowUI {
                 sampleRate: 16000
             });
             this._audioContext = audioContext;
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().catch(() => {});
+            }
 
             const source = audioContext.createMediaStreamSource(stream);
             const bufferSize = 4096;
             const scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
             this._scriptNode = scriptNode;
+            const mute = audioContext.createGain();
+            mute.gain.value = 0;
+            this._muteGain = mute;
+            const inputRate = audioContext.sampleRate || 16000;
+
+            logger.info('Microphone capture rate', {
+                component: 'MainWindowUI',
+                sampleRate: inputRate
+            });
 
             scriptNode.onaudioprocess = (event) => {
-                if (!this.isRecording || !window.electronAPI || !window.electronAPI.sendAudioChunk) {
+                if (!window.electronAPI || !window.electronAPI.sendAudioChunk) {
                     return;
                 }
-                const inputData = event.inputBuffer.getChannelData(0);
+                const inputData = this._downsampleTo16k(event.inputBuffer.getChannelData(0), inputRate);
                 const pcm16 = new Int16Array(inputData.length);
                 for (let i = 0; i < inputData.length; i++) {
                     const s = Math.max(-1, Math.min(1, inputData[i]));
                     pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                 }
-                window.electronAPI.sendAudioChunk(pcm16.buffer);
+                const bytes = new Uint8Array(pcm16.buffer);
+                if (this.isRecording || this._drainingCapture) {
+                    this._flushCapturePreroll();
+                    window.electronAPI.sendAudioChunk(bytes);
+                    return;
+                }
+                this._pushCapturePreroll(bytes);
             };
 
             source.connect(scriptNode);
-            scriptNode.connect(audioContext.destination);
+            scriptNode.connect(mute);
+            mute.connect(audioContext.destination);
 
             logger.info('Renderer audio capture started', { component: 'MainWindowUI' });
         } catch (error) {
@@ -720,10 +859,19 @@ class MainWindowUI {
                 component: 'MainWindowUI',
                 error: error.message
             });
-            // Notify main process so it can stop the recording state
-            try {
-                await window.electronAPI.stopSpeechRecognition();
-            } catch (_) { /* ignore */ }
+            this._stopRendererAudioCapture();
+            if (this.isRecording) {
+                try {
+                    await window.electronAPI.stopSpeechRecognition();
+                } catch (_) { /* ignore */ }
+            }
+        }
+        })();
+
+        try {
+            await this._captureOpening;
+        } finally {
+            this._captureOpening = null;
         }
     }
 
@@ -733,6 +881,10 @@ class MainWindowUI {
                 this._scriptNode.disconnect();
                 this._scriptNode.onaudioprocess = null;
                 this._scriptNode = null;
+            }
+            if (this._muteGain) {
+                this._muteGain.disconnect();
+                this._muteGain = null;
             }
             if (this._mediaStream) {
                 this._mediaStream.getTracks().forEach((track) => track.stop());
@@ -746,6 +898,7 @@ class MainWindowUI {
                 clearInterval(this._captureInterval);
                 this._captureInterval = null;
             }
+            this._prerollChunks = [];
         } catch (error) {
             logger.error('Error stopping renderer audio capture', {
                 component: 'MainWindowUI',

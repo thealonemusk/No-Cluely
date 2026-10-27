@@ -16,6 +16,32 @@ function ensureEmptyCwd() {
   return EMPTY_CWD;
 }
 
+// Settings and the docs say "grok-4.7-high". The API id is grok-4.7, and
+// "high" is the reasoning_effort parameter. grok-4.6 uses effort instead.
+function resolveModel(modelId) {
+  const id = modelId || 'grok-4.7-high';
+  const grok47 = /^grok-4\.7-(low|medium|high)$/.exec(id);
+  if (grok47) {
+    return { id: 'grok-4.7', params: [{ id: 'reasoning_effort', value: grok47[1] }] };
+  }
+  const grok46 = /^grok-4\.6-(low|medium|high)$/.exec(id);
+  if (grok46) {
+    return { id: 'grok-4.6', params: [{ id: 'effort', value: grok46[1] }] };
+  }
+  return { id };
+}
+
+function withCause(error) {
+  const cause = error && error.cause;
+  const detail = cause && (cause.code || cause.message);
+  if (!detail || !error.message || String(error.message).includes(String(detail))) {
+    return error;
+  }
+  const wrapped = new Error(`${error.message}: ${detail}`);
+  wrapped.cause = error;
+  return wrapped;
+}
+
 function buildPrompt(system, messages) {
   const parts = [];
   if (system && String(system).trim()) {
@@ -192,7 +218,7 @@ async function completeOnce(options) {
     if (!warmAgent) {
       warmAgent = await withTimeout(Agent.create({
         apiKey,
-        model: { id: modelId },
+        model: resolveModel(modelId),
         tools: NO_TOOLS,
         local: {
           cwd,
@@ -271,7 +297,7 @@ async function completeOnce(options) {
     if (reused && !options._retried) {
       return completeOnce({ ...options, _retried: true, isolate: true });
     }
-    throw error;
+    throw withCause(error);
   }
 }
 

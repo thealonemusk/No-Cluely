@@ -18,6 +18,7 @@ model_dir = None
 model_device = None
 model_compute_type = None
 model_cpu_threads = None
+session_language = None
 
 
 def send(payload):
@@ -67,7 +68,7 @@ def resolve_cpu_threads(requested):
     except (TypeError, ValueError):
         pass
     logical = os.cpu_count() or 4
-    return max(1, logical // 2)
+    return max(1, min(8, logical - 1))
 
 
 def resolve_beam_size(requested, device):
@@ -77,17 +78,21 @@ def resolve_beam_size(requested, device):
             return value
     except (TypeError, ValueError):
         pass
-    return 1 if device == 'cpu' else 5
+    # Greedy decode. Beam search (the old GPU default of 5) is much slower
+    # for live mic audio and was the main reason transcripts lagged speech.
+    return 1
 
 
 def unload_model():
     global model, model_name, model_dir, model_device, model_compute_type, model_cpu_threads
+    global session_language
     model = None
     model_name = None
     model_dir = None
     model_device = None
     model_compute_type = None
     model_cpu_threads = None
+    session_language = None
     gc.collect()
 
 
@@ -159,11 +164,17 @@ def load_audio_input(audio_path):
 
 
 def transcribe(request):
+    global session_language
     loaded_model, device, compute_type = ensure_model(request)
     language = request.get('language') or None
-    if language in ('auto', 'detect'):
+    if isinstance(language, str) and language.lower() in ('auto', 'detect', ''):
         language = None
+    # Language detection on every short clip is slow and often wrong. Detect
+    # once, then reuse that language for the rest of the loaded model.
+    if language is None and session_language:
+        language = session_language
 
+    prompt = (request.get('initial_prompt') or '').strip() or None
     beam_size = resolve_beam_size(request.get('beam_size'), device)
     segments, info = loaded_model.transcribe(
         load_audio_input(request['audio_path']),
@@ -172,11 +183,16 @@ def transcribe(request):
         beam_size=beam_size,
         best_of=1,
         patience=1.0,
-        temperature=0,
+        temperature=0.0,
         condition_on_previous_text=False,
+        initial_prompt=prompt,
         without_timestamps=True,
         no_speech_threshold=0.6,
     )
+    detected = getattr(info, 'language', None)
+    detected_probability = getattr(info, 'language_probability', 0) or 0
+    if session_language is None and detected and detected_probability >= 0.6:
+        session_language = detected
     text = ''.join(segment.text for segment in segments).strip()
     return {
         'text': text,

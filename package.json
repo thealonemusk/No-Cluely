@@ -117,7 +117,7 @@
           ]
         }
       ],
-      "sign": null
+      "signAndEditExecutable": false
     },
     "linux": {
       "target": [

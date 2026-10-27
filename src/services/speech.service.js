@@ -423,6 +423,10 @@ class SpeechService extends EventEmitter {
     this.transcriptionInFlight = false;
     this.pendingFlush = false;
     this.pendingFinal = false;
+    this._pendingSegments = [];
+    this._audioEpoch = 0;
+    this._acceptAudioUntil = 0;
+    this._stopEpoch = 0;
     this.audioProgram = null;
     this.whisperCommand = null;
     this.whisperWorker = new WhisperWorkerService();
@@ -558,6 +562,7 @@ class SpeechService extends EventEmitter {
         return;
       }
 
+      this._stopEpoch = (this._stopEpoch || 0) + 1;
       this.sessionStartTime = Date.now();
       this.retryCount = 0;
 
@@ -584,15 +589,12 @@ class SpeechService extends EventEmitter {
       throw new Error('Azure Speech client not initialized');
     }
 
-    this.isRecording = true;
-    this.emit('recording-started');
-    this.emit('status', 'Azure recording started');
     this._cleanup();
+    this.isRecording = true;
 
     try {
       this.pushStream = sdk.AudioInputStream.createPushStream();
       this.audioConfig = sdk.AudioConfig.fromStreamInput(this.pushStream);
-      this._startMicrophoneCapture();
       this.recognizer = new sdk.SpeechRecognizer(this.speechConfig, this.audioConfig);
     } catch (error) {
       logger.error('Failed to start Azure recording session', { error: error.message });
@@ -660,6 +662,16 @@ class SpeechService extends EventEmitter {
       this.stopRecording();
     }, 10000);
 
+    // Windows and macOS have no usable sox/arecord capture. Feed Azure the
+    // same renderer microphone the Whisper path uses.
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      this.useRendererCapture = true;
+    } else {
+      this._startMicrophoneCapture();
+    }
+    this.emit('recording-started');
+    this.emit('status', 'Azure recording started');
+
     this.recognizer.startContinuousRecognitionAsync(
       () => {
         clearTimeout(startTimeout);
@@ -684,6 +696,7 @@ class SpeechService extends EventEmitter {
     this.pendingFlush = false;
     this.pendingFinal = false;
     this.manualStopRequested = false;
+    this._pendingSegments = [];
     this._resetVadState();
     this.emit('recording-started');
     this.emit('status', 'Local Whisper recording started');
@@ -748,6 +761,65 @@ class SpeechService extends EventEmitter {
     this.vadPreRoll = [];            // ring of recent pre-speech chunks
     this.vadPreRollMs = 0;           // duration held in the pre-roll ring
     this.vadLastChunkAt = 0;         // timestamp of the last ingested chunk
+    this.vadCalibrated = false;
+    this.vadCalibMs = 0;
+    this.vadCalibEnergies = [];
+    this.vadEnterMs = 0;
+  }
+
+  _pushVadPreRoll(buffer, chunkMs) {
+    this.vadPreRoll.push(buffer);
+    this.vadPreRollMs += chunkMs;
+    const limit = Math.max(this._getPreRollMs(), 700);
+    while (this.vadPreRollMs > limit && this.vadPreRoll.length > 1) {
+      const dropped = this.vadPreRoll.shift();
+      this.vadPreRollMs -= this._chunkDurationMs(dropped);
+    }
+  }
+
+  _finishVadCalibration() {
+    const samples = this.vadCalibEnergies.length ? this.vadCalibEnergies : [this._getVadEnergyFloor()];
+    const sorted = samples.slice().sort((a, b) => a - b);
+    const quiet = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.2))];
+    const loud = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.8))];
+    const absolute = this._getVadEnergyFloor();
+    if (loud > quiet * 2.2 && quiet > 0) {
+      this.vadNoiseFloor = Math.max(absolute * 0.25, quiet);
+    } else {
+      // Steady level: sit the floor under it so this level can still be
+      // speech, and a later drop counts as silence.
+      this.vadNoiseFloor = Math.max(absolute * 0.25, quiet * 0.35);
+    }
+    this.vadNoiseInit = true;
+    this.vadCalibrated = true;
+    this.vadCalibEnergies = [];
+  }
+
+  _trackNoiseFloor(energy) {
+    if (!this.vadNoiseInit) {
+      this.vadNoiseFloor = energy;
+      this.vadNoiseInit = true;
+      return;
+    }
+    if (energy < this.vadNoiseFloor) {
+      this.vadNoiseFloor = this.vadNoiseFloor * 0.55 + energy * 0.45;
+    } else {
+      const capped = Math.min(energy, this.vadNoiseFloor * 1.5);
+      this.vadNoiseFloor = this.vadNoiseFloor * 0.985 + capped * 0.015;
+    }
+  }
+
+  _beginUtteranceFromPreRoll() {
+    this.vadSpeaking = true;
+    this.vadSilenceMs = 0;
+    this.vadSpeechMs = this.vadEnterMs;
+    this.vadEnterMs = 0;
+    for (const pre of this.vadPreRoll) {
+      this.segmentBuffers.push(pre);
+      this.segmentBytes += pre.length;
+    }
+    this.vadPreRoll = [];
+    this.vadPreRollMs = 0;
   }
 
   /**
@@ -789,15 +861,26 @@ class SpeechService extends EventEmitter {
    * Receive raw 16kHz mono 16-bit PCM audio from the renderer and add it to
    * the current Whisper segment buffer.
    */
+  _isAcceptingAudio() {
+    if (this.isRecording) return true;
+    return this._acceptAudioUntil && Date.now() < this._acceptAudioUntil;
+  }
+
   handleAudioChunkFromRenderer(chunk) {
-    if (!this.isRecording || this.provider !== 'whisper' || !this.useRendererCapture) {
+    if (!this._isAcceptingAudio() || !this.useRendererCapture) {
       return;
     }
     if (!chunk || !chunk.length) {
       return;
     }
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this._ingestWhisperAudio(buffer);
+    if (this.provider === 'azure') {
+      this._handleAudioChunk(buffer);
+      return;
+    }
+    if (this.provider === 'whisper') {
+      this._ingestWhisperAudio(buffer);
+    }
   }
 
   /**
@@ -856,47 +939,35 @@ class SpeechService extends EventEmitter {
     const chunkMs = this._chunkDurationMs(buffer);
     const energy = this._chunkRmsEnergy(buffer);
 
-    const floor = this._getVadEnergyFloor();
-    // Seed / adapt the background noise floor while not actively speaking so
-    // the threshold tracks the room rather than a hard-coded constant. Seed
-    // conservatively: if the very first chunk is already loud (the user started
-    // talking immediately), clamp to the configured floor so a high seed can't
-    // push the enter-threshold out of reach and stall VAD for the whole session.
-    if (!this.vadNoiseInit) {
-      this.vadNoiseFloor = Math.min(energy, floor);
-      this.vadNoiseInit = true;
+    // Learn the room for a short moment before the first utterance. The old
+    // seed clamped the floor under a constant, so ordinary mic noise looked
+    // like speech for the rest of the session and pauses were never detected.
+    if (!this.vadCalibrated) {
+      this._pushVadPreRoll(buffer, chunkMs);
+      this.vadCalibEnergies.push(energy);
+      this.vadCalibMs += chunkMs;
+      if (this.vadCalibMs < 400) {
+        return;
+      }
+      this._finishVadCalibration();
+      return;
     }
-    // Hysteresis: it takes more energy to *start* an utterance than to keep
-    // one going, so a brief dip mid-sentence doesn't end it prematurely.
+
+    const floor = this._getVadEnergyFloor();
     const enterThreshold = Math.max(floor, this.vadNoiseFloor * 2.5);
-    const exitThreshold = Math.max(floor * 0.7, this.vadNoiseFloor * 1.6);
-    const isVoiced = this.vadSpeaking ? energy >= exitThreshold : energy >= enterThreshold;
+    const exitThreshold = Math.max(floor * 0.6, this.vadNoiseFloor * 1.75);
+    const isVoiced = energy >= (this.vadSpeaking ? exitThreshold : enterThreshold);
 
     if (!this.vadSpeaking) {
+      this._pushVadPreRoll(buffer, chunkMs);
       if (isVoiced) {
-        // Speech onset: prepend the pre-roll so the first syllable survives.
-        this.vadSpeaking = true;
-        this.vadSpeechMs = 0;
-        this.vadSilenceMs = 0;
-        for (const pre of this.vadPreRoll) {
-          this.segmentBuffers.push(pre);
-          this.segmentBytes += pre.length;
+        this.vadEnterMs += chunkMs;
+        if (this.vadEnterMs >= 90) {
+          this._beginUtteranceFromPreRoll();
         }
-        this.vadPreRoll = [];
-        this.vadPreRollMs = 0;
-        this.segmentBuffers.push(buffer);
-        this.segmentBytes += buffer.length;
-        this.vadSpeechMs += chunkMs;
       } else {
-        // Background: adapt the noise floor and keep a short pre-roll ring.
-        this.vadNoiseFloor = this.vadNoiseFloor * 0.95 + energy * 0.05;
-        this.vadPreRoll.push(buffer);
-        this.vadPreRollMs += chunkMs;
-        const preRollLimit = this._getPreRollMs();
-        while (this.vadPreRollMs > preRollLimit && this.vadPreRoll.length > 1) {
-          const dropped = this.vadPreRoll.shift();
-          this.vadPreRollMs -= this._chunkDurationMs(dropped);
-        }
+        this.vadEnterMs = 0;
+        this._trackNoiseFloor(energy);
       }
       return;
     }
@@ -910,6 +981,7 @@ class SpeechService extends EventEmitter {
       this.vadSilenceMs = 0;
     } else {
       this.vadSilenceMs += chunkMs;
+      this._trackNoiseFloor(energy);
     }
 
     const pausedLongEnough = this.vadSilenceMs >= this._getSilenceHangoverMs();
@@ -926,6 +998,7 @@ class SpeechService extends EventEmitter {
       this.vadSpeaking = false;
       this.vadSpeechMs = 0;
       this.vadSilenceMs = 0;
+      this.vadEnterMs = 0;
     }
   }
 
@@ -934,6 +1007,7 @@ class SpeechService extends EventEmitter {
     this.vadSpeaking = false;
     this.vadSpeechMs = 0;
     this.vadSilenceMs = 0;
+    this.vadEnterMs = 0;
     this.vadPreRoll = [];
     this.vadPreRollMs = 0;
     this._flushWhisperSegment({ final: false }).catch((error) => {
@@ -959,28 +1033,45 @@ class SpeechService extends EventEmitter {
     });
 
     if (this.provider === 'azure' && this.recognizer) {
-      try {
-        this.recognizer.stopContinuousRecognitionAsync(
-          () => {
-            this._finalizeStop('Recording stopped');
-          },
-          (error) => {
-            logger.error('Error during recognition stop', { error: error.toString() });
-            this._finalizeStop('Recording stopped');
-          }
-        );
-      } catch (error) {
-        logger.error('Error stopping recognizer', { error: error.message });
-        this._finalizeStop('Recording stopped');
-      }
+      this._acceptAudioUntil = Date.now() + 400;
+      this.emit('recording-stopped');
+      const epoch = this._stopEpoch;
+      setTimeout(() => {
+        if (epoch !== this._stopEpoch) return;
+        this._acceptAudioUntil = 0;
+        if (!this.recognizer) {
+          this._finalizeStop('Recording stopped', { alreadyNotified: true });
+          return;
+        }
+        try {
+          this.recognizer.stopContinuousRecognitionAsync(
+            () => {
+              this._finalizeStop('Recording stopped', { alreadyNotified: true });
+            },
+            (error) => {
+              logger.error('Error during recognition stop', { error: error.toString() });
+              this._finalizeStop('Recording stopped', { alreadyNotified: true });
+            }
+          );
+        } catch (error) {
+          logger.error('Error stopping recognizer', { error: error.message });
+          this._finalizeStop('Recording stopped', { alreadyNotified: true });
+        }
+      }, 300);
       return;
     }
 
     if (this.provider === 'whisper') {
       this.isProcessingAudio = true;
+      this._acceptAudioUntil = Date.now() + 400;
       this.emit('recording-stopped');
       this.emit('status', 'Processing local speech…');
-      this._finalizeWhisperStop({ captureAlreadyStopped: true });
+      const epoch = this._stopEpoch;
+      setTimeout(() => {
+        if (epoch !== this._stopEpoch || this.isRecording) return;
+        this._acceptAudioUntil = 0;
+        this._finalizeWhisperStop({ captureAlreadyStopped: true });
+      }, 350);
       return;
     }
 
@@ -1018,9 +1109,11 @@ class SpeechService extends EventEmitter {
     }
   }
 
-  _finalizeStop(statusMessage) {
+  _finalizeStop(statusMessage, { alreadyNotified = false } = {}) {
     this._cleanup();
-    this.emit('recording-stopped');
+    if (!alreadyNotified) {
+      this.emit('recording-stopped');
+    }
     this.emit('status', statusMessage);
   }
 
@@ -1072,9 +1165,12 @@ class SpeechService extends EventEmitter {
 
     this.segmentBuffers = [];
     this.segmentBytes = 0;
+    this._pendingSegments = [];
+    this._audioEpoch = (this._audioEpoch || 0) + 1;
     this.transcriptionInFlight = false;
     this.pendingFlush = false;
     this.pendingFinal = false;
+    this._flushFinal = false;
     this._resetVadState();
     this._audioDataLogged = false;
     this.useRendererCapture = false;
@@ -1246,7 +1342,7 @@ class SpeechService extends EventEmitter {
   }
 
   _getWhisperModel() {
-    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || config.get('speech.whisper.model') || 'base';
+    return this._getSetting('whisperModel') || process.env.WHISPER_MODEL || config.get('speech.whisper.model') || 'small';
   }
 
   _getWhisperModelDir() {
@@ -1301,7 +1397,7 @@ class SpeechService extends EventEmitter {
   }
 
   _getSilenceHangoverMs() {
-    return this._vadNumber('whisperSilenceHangoverMs', 'WHISPER_SILENCE_HANGOVER_MS', 'speech.whisper.silenceHangoverMs', 320, 200);
+    return this._vadNumber('whisperSilenceHangoverMs', 'WHISPER_SILENCE_HANGOVER_MS', 'speech.whisper.silenceHangoverMs', 700, 200);
   }
 
   _getMinUtteranceMs() {
@@ -1309,15 +1405,15 @@ class SpeechService extends EventEmitter {
   }
 
   _getMaxUtteranceMs() {
-    return this._vadNumber('whisperMaxUtteranceMs', 'WHISPER_MAX_UTTERANCE_MS', 'speech.whisper.maxUtteranceMs', 15000, 2000);
+    return this._vadNumber('whisperMaxUtteranceMs', 'WHISPER_MAX_UTTERANCE_MS', 'speech.whisper.maxUtteranceMs', 30000, 2000);
   }
 
   _getPreRollMs() {
-    return this._vadNumber('whisperPreRollMs', 'WHISPER_PRE_ROLL_MS', 'speech.whisper.preRollMs', 300, 0);
+    return this._vadNumber('whisperPreRollMs', 'WHISPER_PRE_ROLL_MS', 'speech.whisper.preRollMs', 450, 0);
   }
 
   _getVadEnergyFloor() {
-    return this._vadNumber('whisperVadEnergyFloor', 'WHISPER_VAD_ENERGY_FLOOR', 'speech.whisper.vadEnergyFloor', 0.008, 0.0005);
+    return this._vadNumber('whisperVadEnergyFloor', 'WHISPER_VAD_ENERGY_FLOOR', 'speech.whisper.vadEnergyFloor', 0.005, 0.0005);
   }
 
   _getSetting(key) {
@@ -1772,7 +1868,7 @@ class SpeechService extends EventEmitter {
   }
 
   _handleAudioChunk(chunk) {
-    if (!chunk || !chunk.length || !this.isRecording) {
+    if (!chunk || !chunk.length || !this._isAcceptingAudio()) {
       return;
     }
 
@@ -1790,47 +1886,58 @@ class SpeechService extends EventEmitter {
     }
   }
 
-  async _flushWhisperSegment({ final }) {
-    if (this.transcriptionInFlight) {
-      // A flush was requested while a transcription is still running. Record
-      // that we owe a follow-up flush for ANY request (not just a final one),
-      // otherwise an utterance that ended mid-transcription stays stranded in
-      // the buffer until the next utterance ends or the session stops. Track
-      // final-ness separately so a queued stop still finalises correctly.
-      this.pendingFlush = true;
-      if (final) {
-        this.pendingFinal = true;
-      }
-      return;
-    }
-
-    if (!this.segmentBytes) {
-      return;
-    }
-
-    const audioBuffer = Buffer.concat(this.segmentBuffers, this.segmentBytes);
+  _detachSegment() {
+    if (!this.segmentBytes) return null;
+    const audio = Buffer.concat(this.segmentBuffers, this.segmentBytes);
     this.segmentBuffers = [];
     this.segmentBytes = 0;
+    return audio;
+  }
+
+  async _flushWhisperSegment({ final }) {
+    const epoch = this._audioEpoch || 0;
+    const detached = this._detachSegment();
+    if (detached) this._pendingSegments.push(detached);
+    if (final) this._flushFinal = true;
+    if (this.transcriptionInFlight) return;
+    if (!this._pendingSegments.length && !(this._flushFinal && this.segmentBytes)) return;
 
     this.transcriptionInFlight = true;
-
     try {
-      const transcript = await this._transcribeWhisperBuffer(audioBuffer);
-      const clean = transcript ? transcript.trim() : '';
-      if (clean && !this._isHallucinatedTranscript(clean)) {
-        this.emit('transcription', clean);
-      } else if (clean) {
-        logger.debug('Dropped likely Whisper silence hallucination', { transcript: clean });
+      while (this._pendingSegments.length && epoch === this._audioEpoch) {
+        const audio = this._pendingSegments.shift();
+        try {
+          await this._transcribeAndEmit(audio, epoch);
+        } catch (error) {
+          logger.error('Whisper segment transcription failed', { error: error.message });
+          if (epoch === this._audioEpoch) {
+            this.emit('error', `Whisper transcription failed: ${error.message}`);
+          }
+        }
       }
     } finally {
+      if (epoch !== this._audioEpoch) return;
       this.transcriptionInFlight = false;
-
-      if (this.pendingFlush) {
-        this.pendingFlush = false;
-        const runFinal = this.pendingFinal;
-        this.pendingFinal = false;
-        await this._flushWhisperSegment({ final: runFinal });
+      if (this._flushFinal && this.segmentBytes) {
+        const tail = this._detachSegment();
+        if (tail) this._pendingSegments.push(tail);
       }
+      if (this._pendingSegments.length) {
+        await this._flushWhisperSegment({ final: false });
+      } else {
+        this._flushFinal = false;
+      }
+    }
+  }
+
+  async _transcribeAndEmit(audioBuffer, epoch) {
+    const transcript = await this._transcribeWhisperBuffer(audioBuffer);
+    if (epoch !== this._audioEpoch) return;
+    const clean = this._cleanTranscript(transcript);
+    if (clean) {
+      this.emit('transcription', clean);
+    } else if (transcript && transcript.trim()) {
+      logger.debug('Dropped likely Whisper silence hallucination', { transcript });
     }
   }
 
@@ -1840,25 +1947,30 @@ class SpeechService extends EventEmitter {
    * VAD already prevents most silent flushes; this is the final guard so these
    * phantom phrases never reach the chat or the LLM.
    */
+  _cleanTranscript(text) {
+    let cleaned = String(text || '').trim();
+    if (!cleaned) return '';
+    const trailing = /(?:\s*[,.!]?\s*)(thanks for watching|thank you for watching|thank you so much for watching|please subscribe|like and subscribe|subtitles by the amara\.?\s*org community)[.!\s]*$/i;
+    let previous;
+    do {
+      previous = cleaned;
+      cleaned = cleaned.replace(trailing, '').trim();
+    } while (cleaned && cleaned !== previous);
+    if (!cleaned || this._isHallucinatedTranscript(cleaned)) return '';
+    return cleaned;
+  }
+
   _isHallucinatedTranscript(text) {
     const normalized = text.toLowerCase().replace(/[\s.,!?¡¿"'`]+/g, ' ').trim();
     if (!normalized) {
       return true;
     }
     const HALLUCINATIONS = new Set([
-      'thank you',
       'thank you for watching',
       'thanks for watching',
       'thank you so much for watching',
       'please subscribe',
       'like and subscribe',
-      'you',
-      'bye',
-      'bye bye',
-      'okay',
-      'ok',
-      'so',
-      'the end',
       'subtitles by the amara org community'
     ]);
     return HALLUCINATIONS.has(normalized);

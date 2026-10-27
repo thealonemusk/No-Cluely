@@ -61,6 +61,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateActiveSkill: (skill) => ipcRenderer.invoke('update-active-skill', skill),
   restartAppForStealth: () => ipcRenderer.invoke('restart-app-for-stealth'),
   closeWindow: () => ipcRenderer.invoke('close-window'),
+  setIgnoreMouseEvents: (ignore) => ipcRenderer.send('set-ignore-mouse-events', { ignore: !!ignore }),
   notifyMainWindowReady: () => {
     try {
       ipcRenderer.send('main-window-ready');

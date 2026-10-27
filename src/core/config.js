@@ -90,8 +90,8 @@ class ConfigManager {
           outputFormat: 'detailed'
         },
         whisper: {
-          model: 'base',
-          language: 'en',
+          model: 'small',
+          language: 'auto',
           // segmentMs is the legacy fixed-window size and now acts as the
           // hard upper bound for a single utterance when VAD is enabled.
           segmentMs: 4000,
@@ -101,18 +101,20 @@ class ConfigManager {
           // with natural utterance boundaries.
           vadEnabled: true,
           // Trailing silence (ms) that ends an utterance and triggers a flush.
-          silenceHangoverMs: 320,
+          // Long enough that a breath does not split a sentence.
+          silenceHangoverMs: 700,
           // Minimum accumulated speech (ms) before a pause counts as an
           // utterance — guards against coughs/clicks producing empty flushes.
           minUtteranceMs: 350,
           // Hard cap (ms): force-flush a long monologue even without a pause.
-          maxUtteranceMs: 10000,
+          // High enough that a normal answer is not cut off mid-sentence.
+          maxUtteranceMs: 30000,
           // Pre-roll (ms) of audio kept before speech onset so the first
           // syllable isn't clipped when we start capturing.
-          preRollMs: 300,
+          preRollMs: 450,
           // Absolute RMS energy floor (normalized 0..1). Energy below this is
           // always treated as silence regardless of the adaptive noise floor.
-          vadEnergyFloor: 0.008
+          vadEnergyFloor: 0.005
         }
       },
 
