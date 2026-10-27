@@ -15,6 +15,7 @@ class WhisperWorkerService {
     this.idleUnloadMs = 60000;
     this.readyInfo = null;
     this.closing = false;
+    this._activeRequests = 0;
   }
 
   configure({ pythonPath, scriptPath, idleUnloadMs = 60000 }) {
@@ -40,36 +41,46 @@ class WhisperWorkerService {
     if (!this.isConfigured()) {
       throw new Error('Persistent Whisper worker is not configured');
     }
+    this._activeRequests += 1;
     this._clearIdleTimer();
-    const result = await this._request({
-      action: 'transcribe',
-      audio_path: audioPath,
-      model: options.model || 'small',
-      language: options.language || 'auto',
-      model_dir: options.modelDir || null,
-      device: options.device || 'auto',
-      compute_type: options.computeType || 'auto',
-      cpu_threads: options.cpuThreads || 0,
-      beam_size: options.beamSize || 0,
-      initial_prompt: options.initialPrompt || ''
-    });
-    this._scheduleIdleUnload();
-    return result;
+    try {
+      return await this._request({
+        action: 'transcribe',
+        audio_path: audioPath,
+        model: options.model || 'small',
+        language: options.language || 'auto',
+        model_dir: options.modelDir || null,
+        device: options.device || 'auto',
+        compute_type: options.computeType || 'auto',
+        cpu_threads: options.cpuThreads || 0,
+        beam_size: options.beamSize || 0,
+        initial_prompt: options.initialPrompt || ''
+      });
+    } finally {
+      this._activeRequests -= 1;
+      this._scheduleIdleUnload();
+    }
   }
 
   async warmup(options = {}) {
     if (!this.isConfigured()) {
       throw new Error('Persistent Whisper worker is not configured');
     }
+    this._activeRequests += 1;
     this._clearIdleTimer();
-    return this._request({
-      action: 'warmup',
-      model: options.model || 'small',
-      model_dir: options.modelDir || null,
-      device: options.device || 'auto',
-      compute_type: options.computeType || 'auto',
-      cpu_threads: options.cpuThreads || 0
-    });
+    try {
+      return await this._request({
+        action: 'warmup',
+        model: options.model || 'small',
+        model_dir: options.modelDir || null,
+        device: options.device || 'auto',
+        compute_type: options.computeType || 'auto',
+        cpu_threads: options.cpuThreads || 0
+      });
+    } finally {
+      this._activeRequests -= 1;
+      this._scheduleIdleUnload();
+    }
   }
 
   releaseWhenIdle() {
@@ -176,12 +187,14 @@ class WhisperWorkerService {
   _scheduleIdleUnload() {
     this._clearIdleTimer();
     this.idleTimer = setTimeout(() => {
-      if (!this.process || this.pending.size > 0) {
+      this.idleTimer = null;
+      if (!this.process || this.pending.size > 0 || this._activeRequests > 0) {
         return;
       }
-      this._request({ action: 'unload' }, 30000)
-        .then(() => logger.info('Whisper model unloaded after idle timeout'))
-        .catch((error) => logger.warn('Could not unload idle Whisper model', { error: error.message }));
+      // Dropping the Python model object does not return CTranslate2 RSS.
+      // Exiting the process does; the next transcription starts a new one.
+      logger.info('Stopping idle Whisper process to release memory');
+      this.close();
     }, this.idleUnloadMs);
   }
 

@@ -68,6 +68,10 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("in-process-gpu");
 }
 
+// Chromium keeps a spare renderer process warm. This app creates its windows
+// itself, so that extra process is only idle memory.
+app.commandLine.appendSwitch("disable-features", "SpareRendererForSitePerProcess");
+
 // Keep Chromium network noise out of the terminal; app-level logs still go through Winston.
 app.commandLine.appendSwitch("log-level", "3");
 app.commandLine.appendSwitch("disable-background-networking");

@@ -3,7 +3,7 @@ node_modules/
 .venv-whisper/
 .whisper-models/
 eng.traineddata
-dist/
+dist*/
 bin/
 .DS_Store
 *.log

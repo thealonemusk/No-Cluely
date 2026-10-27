@@ -1,5 +1,4 @@
 const https = require('https');
-const { GoogleGenAI } = require('@google/genai');
 const logger = require('../core/logger').createServiceLogger('LLM');
 const config = require('../core/config');
 const { promptLoader } = require('../../prompt-loader');
@@ -300,6 +299,7 @@ class LLMService {
     }
 
     try {
+      const { GoogleGenAI } = require('@google/genai');
       this.client = new GoogleGenAI({ apiKey });
       
       // Use the configured model name (default: gemini-3.5-flash)

@@ -389,17 +389,27 @@ const config = require('../core/config');
 const WhisperWorkerService = require('./whisper-worker.service');
 
 let sdk = null;
-try {
-  sdk = require('microsoft-cognitiveservices-speech-sdk');
-} catch (error) {
-  logger.warn('Azure Speech SDK unavailable', { error: error.message });
+function loadAzureSdk() {
+  if (sdk) return sdk;
+  try {
+    sdk = require('microsoft-cognitiveservices-speech-sdk');
+  } catch (error) {
+    logger.warn('Azure Speech SDK unavailable', { error: error.message });
+  }
+  return sdk;
 }
 
 let recorder = null;
-try {
-  recorder = require('node-record-lpcm16');
-} catch (error) {
-  logger.warn('Local audio recorder dependency unavailable', { error: error.message });
+let recorderLoadAttempted = false;
+function getRecorder() {
+  if (recorderLoadAttempted) return recorder;
+  recorderLoadAttempted = true;
+  try {
+    recorder = require('node-record-lpcm16');
+  } catch (error) {
+    logger.warn('Local audio recorder dependency unavailable', { error: error.message });
+  }
+  return recorder;
 }
 
 class SpeechService extends EventEmitter {
@@ -464,6 +474,8 @@ class SpeechService extends EventEmitter {
 
   _initializeAzureClient() {
     try {
+      loadAzureSdk();
+      const recorder = getRecorder();
       if (!sdk) {
         throw new Error('Azure Speech SDK dependency is not installed');
       }
@@ -1504,7 +1516,7 @@ class SpeechService extends EventEmitter {
   _configureWhisperWorker() {
     const pythonPath = this._getWhisperPythonPath();
     const scriptPath = this._getWhisperWorkerScriptPath();
-    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS || 180000));
+    const idleUnloadMs = Math.max(10000, Number(process.env.WHISPER_GPU_IDLE_MS || 60000));
     this.whisperWorker.configure({ pythonPath, scriptPath, idleUnloadMs });
 
     logger.info('Whisper worker configuration', {
@@ -1743,6 +1755,7 @@ class SpeechService extends EventEmitter {
   }
 
   _startMicrophoneCapture() {
+    const recorder = getRecorder();
     if (!recorder || typeof recorder.record !== 'function') {
       this.emit('error', 'Local microphone capture dependency is missing. Run npm install to restore speech recording support.');
       return;
@@ -1781,6 +1794,7 @@ class SpeechService extends EventEmitter {
   }
 
   _startMicrophoneCaptureWithFallback(candidates) {
+    const recorder = getRecorder();
     const available = candidates.filter((c) => this._audioProgramExists(c.bin));
 
     if (available.length === 0) {

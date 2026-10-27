@@ -22,6 +22,7 @@ class WindowManager {
       lastCheckedAt: null
     };
     this.isCheckingScreenCaptureStatus = false;
+    this.boundWindows = new WeakSet();
     this.isInitialized = false;
     this.isInitializing = false;
     this.isRecording = false;
@@ -111,11 +112,9 @@ class WindowManager {
       await this.createMainWindow({ autoShow: showMainWindow });
       await this.createChatWindow();
       await this.createLLMResponseWindow();
-      await this.createSettingsWindow();
       
       this.setupWindowEventHandlers();
       this.setupScreenTracking();
-      this.setupScreenCaptureAvailabilityWatcher();
 
       // Make windows interactive by default so they are not click-through
       this.setInteractive(true);
@@ -273,7 +272,7 @@ class WindowManager {
         ...config.get('window.webPreferences'),
         nodeIntegration: false,
         contextIsolation: true,
-        backgroundThrottling: false,
+        backgroundThrottling: type === 'main' ? false : true,
         devTools: true, // Enable DevTools for debugging
       },
       show: false, // Never show during creation, use showOnCurrentDesktop instead
@@ -881,61 +880,49 @@ class WindowManager {
   
   setupWindowEventHandlers() {
     this.windows.forEach((window, type) => {
-      window.on('closed', () => {
-        logger.debug('Window closed', { type });
-        this.windows.delete(type);
-      });
+      this.attachWindowHandlers(window, type);
+    });
+  }
 
-      window.on('focus', () => {
-        this.activeWindow = type;
-        logger.debug('Window focused', { type });
-      });
+  attachWindowHandlers(window, type) {
+    if (this.boundWindows.has(window)) return;
+    this.boundWindows.add(window);
 
-      // SIMPLIFIED blur handler - no aggressive re-focusing
-      window.on('blur', () => {
-        // Only log, don't force focus back
-        logger.debug('Window blurred', { type });
-      });
+    window.on('closed', () => {
+      logger.debug('Window closed', { type });
+      this.windows.delete(type);
+    });
 
-      window.on('show', () => {
-        logger.debug('Window shown', { type });
-      });
+    window.on('focus', () => {
+      this.activeWindow = type;
+      logger.debug('Window focused', { type });
+    });
 
-      window.on('hide', () => {
-        logger.debug('Window hidden', { type });
-      });
+    window.on('blur', () => {
+      logger.debug('Window blurred', { type });
+    });
 
-      // Handle window minimize attempts
-      window.on('minimize', (event) => {
-        event.preventDefault();
-        logger.debug('Prevented window minimize', { type });
-      });
+    window.on('show', () => {
+      logger.debug('Window shown', { type });
+    });
 
-      window.on('restore', () => {
-        // Simplified restore handling
-        logger.debug('Window restored', { type });
-      });
+    window.on('hide', () => {
+      logger.debug('Window hidden', { type });
+    });
+
+    window.on('minimize', (event) => {
+      event.preventDefault();
+      logger.debug('Prevented window minimize', { type });
+    });
+
+    window.on('restore', () => {
+      logger.debug('Window restored', { type });
     });
   }
 
   setupScreenCaptureAvailabilityWatcher() {
-    // Avoid screencast portal errors on Linux/Wayland by disabling periodic detection
-    if (process.platform === 'linux') {
-      logger.info('Skipping screen capture availability watcher on Linux to avoid portal screencast errors');
-      return;
-    }
-
-    if (this.screenCaptureAvailabilityWatcher) {
-      clearInterval(this.screenCaptureAvailabilityWatcher);
-    }
-
-    // This is only a capture availability probe. desktopCapturer.getSources()
-    // cannot tell whether another app is currently sharing the screen.
-    this.screenCaptureAvailabilityWatcher = setInterval(async () => {
-      await this.checkScreenCaptureAvailability();
-    }, 5000); // Check every 5 seconds instead of 1
-
-    logger.info('Screen capture availability watcher initialized');
+    // desktopCapturer.getSources() on a timer retains capture buffers and
+    // cannot tell whether another app is sharing the screen. Do not poll.
   }
 
   async checkScreenCaptureAvailability() {
@@ -1328,21 +1315,25 @@ class WindowManager {
     }
   }
 
-  showSettings() {
+  async showSettings() {
     if (this.isScreenBeingShared) return;
 
-    const settingsWindow = this.windows.get('settings');
-    if (settingsWindow) {
-      this.showOnCurrentDesktop(settingsWindow);
-      this.centerWindow(settingsWindow); // This now positions at top-center
-      
-      // Notify that settings window is shown
-      setTimeout(() => {
-        settingsWindow.webContents.send('settings-window-shown');
-      }, 50);
-      
-      logger.info('Settings window displayed at top');
+    let settingsWindow = this.windows.get('settings');
+    if (!settingsWindow || settingsWindow.isDestroyed()) {
+      settingsWindow = await this.createSettingsWindow();
+      this.attachWindowHandlers(settingsWindow, 'settings');
     }
+
+    this.showOnCurrentDesktop(settingsWindow);
+    this.centerWindow(settingsWindow);
+
+    setTimeout(() => {
+      if (!settingsWindow.isDestroyed()) {
+        settingsWindow.webContents.send('settings-window-shown');
+      }
+    }, 50);
+
+    logger.info('Settings window displayed at top');
   }
 
   hideSettings() {
